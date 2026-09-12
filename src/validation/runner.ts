@@ -21,14 +21,18 @@ async function terminateTree(child: ReturnType<typeof spawn>): Promise<void> {
   try {
     process.kill(-child.pid, 'SIGTERM')
   } catch {
-    try { child.kill('SIGTERM') } catch {}
+    try {
+      child.kill('SIGTERM')
+    } catch {}
   }
   await new Promise(resolve => setTimeout(resolve, 1_000))
   if (child.exitCode !== null) return
   try {
     process.kill(-child.pid, 'SIGKILL')
   } catch {
-    try { child.kill('SIGKILL') } catch {}
+    try {
+      child.kill('SIGKILL')
+    } catch {}
   }
 }
 
@@ -96,10 +100,13 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
     child.once('exit', code => resolve(code))
   })
 
-  const exitCode = await Promise.race([exited, timeout]).finally(() => {
+  const observedExitCode = await Promise.race([exited, timeout]).finally(() => {
     if (timer) clearTimeout(timer)
   })
   if (timedOut) await exited.catch(() => null)
+  // Process-tree termination reports platform-specific shell exit codes (for example 1 on Windows).
+  // A timed-out validation has no trustworthy command exit code, so normalize it for deterministic receipts.
+  const exitCode = timedOut ? null : observedExitCode
 
   const stdout = Buffer.concat(stdoutChunks)
   const stderr = Buffer.concat(stderrChunks)
@@ -134,8 +141,18 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
     timeoutMs: opts.timeoutMs,
     exitCode,
     status,
-    stdout: { path: stdoutPath, sha256: hashBytes(stdout), bytes: stdout.length, truncated: stdoutTruncated },
-    stderr: { path: stderrPath, sha256: hashBytes(stderr), bytes: stderr.length, truncated: stderrTruncated },
+    stdout: {
+      path: stdoutPath,
+      sha256: hashBytes(stdout),
+      bytes: stdout.length,
+      truncated: stdoutTruncated,
+    },
+    stderr: {
+      path: stderrPath,
+      sha256: hashBytes(stderr),
+      bytes: stderr.length,
+      truncated: stderrTruncated,
+    },
     boundHead: head,
     ownershipFingerprint: opts.ownershipFingerprint ?? snapshotHash(after),
     complete: !timedOut && !stdoutTruncated && !stderrTruncated,
