@@ -119,7 +119,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          export PLANX_TARBALL="../recovery-artifacts/$TARBALL"
+          export PLANX_TARBALL="recovery-artifacts/$TARBALL"
           npm run e2e:rc1
 
       - name: Reverify exact SHA after E2E
