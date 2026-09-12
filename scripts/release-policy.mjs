@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync } from 'node:fs'
-import { resolve, relative, sep } from 'node:path'
+import { posix, relative, resolve, sep } from 'node:path'
 
 export const PACKAGE_NAME = '@gilbertgt/dsh-plan-orchestrator'
 
@@ -15,9 +15,19 @@ export const REQUIRED_PACKAGE_FILES = Object.freeze([
   'lib/client.js',
 ])
 
-const EXACT_ALLOWED = new Set(REQUIRED_PACKAGE_FILES)
+const EXACT_ALLOWED = new Set([
+  'package.json',
+  'README.md',
+  'LICENSE',
+  'cordis.patch.yml',
+  'compatibility.json',
+  'profiles/worker.cordis.yml',
+  'profiles/reviewer.cordis.yml',
+])
 
+const BUILD_ENTRYPOINTS = Object.freeze(['lib/index.js', 'lib/client.js'])
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+const LOCAL_JS_REFERENCE = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)["'](\.\.?\/[^"']+\.js)["']/g
 
 const SENSITIVE_PATTERNS = Object.freeze([
   ['private key', /-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/],
@@ -45,8 +55,13 @@ function normalizedPackagePath(input) {
   return input
 }
 
+function isBuildJsPath(path) {
+  return /^lib\/[^/]+\.js$/.test(path)
+}
+
 export function isAllowedPackagePath(input) {
-  return EXACT_ALLOWED.has(normalizedPackagePath(input))
+  const path = normalizedPackagePath(input)
+  return EXACT_ALLOWED.has(path) || isBuildJsPath(path)
 }
 
 export function assertPackageManifest(paths) {
@@ -62,6 +77,32 @@ export function assertPackageManifest(paths) {
     if (!seen.has(required)) throw new Error(`packed tarball is missing ${required}`)
   }
   return seen
+}
+
+export function assertJsDependencyClosure(root, paths) {
+  const manifestJs = new Set(paths.map(normalizedPackagePath).filter(isBuildJsPath))
+  const visited = new Set()
+  const queue = [...BUILD_ENTRYPOINTS]
+
+  while (queue.length) {
+    const path = queue.shift()
+    if (visited.has(path)) continue
+    if (!manifestJs.has(path)) throw new Error(`build graph entry missing from package: ${path}`)
+    visited.add(path)
+
+    const text = readFileSync(resolve(root, ...path.split('/')), 'utf8')
+    LOCAL_JS_REFERENCE.lastIndex = 0
+    for (let match = LOCAL_JS_REFERENCE.exec(text); match; match = LOCAL_JS_REFERENCE.exec(text)) {
+      const target = posix.normalize(posix.join(posix.dirname(path), match[1]))
+      if (!isBuildJsPath(target)) throw new Error(`unsafe local JS reference from ${path}: ${match[1]}`)
+      if (!manifestJs.has(target)) throw new Error(`referenced build chunk missing from package: ${target}`)
+      if (!visited.has(target)) queue.push(target)
+    }
+  }
+
+  const orphans = [...manifestJs].filter(path => !visited.has(path)).sort()
+  if (orphans.length) throw new Error(`unreferenced build chunk(s): ${orphans.join(', ')}`)
+  return visited
 }
 
 export function assertPackageMetadata(pkg) {
