@@ -9,15 +9,13 @@ concurrency:
   group: npm-release-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: read
-  id-token: write
-
 jobs:
-  release:
+  verify:
     name: Verify exact package artifact
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -25,7 +23,6 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.19.0'
-          registry-url: 'https://registry.npmjs.org'
       - name: Require committed lockfile
         run: test -f package-lock.json || { echo 'package-lock.json is required before release'; exit 1; }
       - name: Install locked dependencies
@@ -38,14 +35,19 @@ jobs:
         run: npm run compat:check
         env:
           DSH_VERSION_UNDER_TEST: 0.1.5-rc.1
-      - name: DSH rc.1 package E2E
-        run: npm run e2e:rc1
-        env:
-          PLANX_COEXISTENCE: '1'
       - name: Verify release source
         run: npm run release:source
       - name: Build and verify exact tarball
         run: npm run release:pack
+      - name: DSH rc.1 exact-artifact E2E
+        shell: bash
+        env:
+          PLANX_COEXISTENCE: '1'
+        run: |
+          export PLANX_TARBALL="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('.artifacts/release-manifest.json','utf8'));process.stdout.write('.artifacts/'+m.tarball)")"
+          npm run e2e:rc1
+      - name: Reverify digest after E2E
+        run: node -e "const fs=require('fs'),c=require('crypto');const m=JSON.parse(fs.readFileSync('.artifacts/release-manifest.json','utf8'));const h=c.createHash('sha256').update(fs.readFileSync('.artifacts/'+m.tarball)).digest('hex');if(h!==m.sha256)throw new Error('release tarball digest changed after E2E')"
       - name: Upload verified release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -55,21 +57,40 @@ jobs:
             .artifacts/release-manifest.json
           if-no-files-found: error
           retention-days: 14
+
+  stage:
+    name: Stage exact artifact via npm OIDC
+    needs: verify
+    if: ${{ vars.NPM_STAGE_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.19.0'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Download exact verified artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-release-${{ github.ref_name }}
+          path: .artifacts
       - name: Install staged-publishing npm CLI
-        if: ${{ vars.NPM_STAGE_ENABLED == 'true' }}
         run: npm install --global npm@11.19.1 --ignore-scripts --no-audit --no-fund
       - name: Reverify digest and stage exact tarball via npm OIDC
-        if: ${{ vars.NPM_STAGE_ENABLED == 'true' }}
         shell: bash
         run: |
           TARBALL="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('.artifacts/release-manifest.json','utf8'));process.stdout.write('.artifacts/'+m.tarball)")"
-          node -e "const fs=require('fs'),c=require('crypto');const m=JSON.parse(fs.readFileSync('.artifacts/release-manifest.json','utf8'));const h=c.createHash('sha256').update(fs.readFileSync('.artifacts/'+m.tarball)).digest('hex');if(h!==m.sha256)throw new Error('release tarball digest changed after verification')"
+          node -e "const fs=require('fs'),c=require('crypto');const m=JSON.parse(fs.readFileSync('.artifacts/release-manifest.json','utf8'));const h=c.createHash('sha256').update(fs.readFileSync('.artifacts/'+m.tarball)).digest('hex');if(h!==m.sha256)throw new Error('downloaded release tarball digest mismatch')"
           npm stage publish "$TARBALL" --access public
 
 # Bootstrap behavior:
 # - Leave repository variable NPM_STAGE_ENABLED unset/false for the first npm release.
-# - This workflow then verifies and uploads the exact .tgz but does not publish it.
+# - The verify job then tests and uploads the exact .tgz but never receives OIDC publish permission.
 # - Publish that one verified tarball manually with maintainer 2FA.
-# - Configure npm Trusted Publishing for this workflow with stage-only permission,
+# - Configure npm Trusted Publishing for release.yml with stage-only permission,
 #   then set NPM_STAGE_ENABLED=true for future tags.
+# - The stage job receives OIDC permission only after verify succeeds and never rebuilds/re-packs.
 # - This workflow never falls back to direct `npm publish`.
