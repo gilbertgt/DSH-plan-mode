@@ -51,8 +51,10 @@ export function parseValidationCommand(command:string): ParsedValidationCommand 
 
   const action = tokens.shift()
   let script: string | undefined
-  if (action === 'test') script = 'test'
-  else if (action === 'run') script = tokens.shift()
+  if (action === 'test') {
+    if (manager === 'bun') throw new Error('bun validation must use bun run <script>; bun test is a direct runner, not a package script')
+    script = 'test'
+  } else if (action === 'run') script = tokens.shift()
   if (!script || !/^[A-Za-z0-9_.:@/-]{1,128}$/.test(script) || script === '.' || script === '..' || script.includes('../')) {
     throw new Error('validation command must select one existing package script')
   }
