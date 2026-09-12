@@ -63,8 +63,6 @@ export function apply(ctx: Context) {
   const isEnabled = (agent: any): boolean => Boolean(agent && settings.effective(agent.session?.header?.cwd).enabled)
   const firstPolicySeen = new WeakSet<object>()
 
-  // Runtime seams are bound explicitly and fail closed. Validation has no
-  // child_process fallback; mutating child roles receive the live timeout.
   c.effect(() => configureValidationShell(c.shell), 'plan-orchestrator: sandbox validation runtime')
   c.effect(() => configureRoleTimeoutResolver((cwd?: string) => settings.effective(cwd).execution.roleTimeoutMs), 'plan-orchestrator: role timeout runtime')
 
@@ -92,8 +90,6 @@ export function apply(ctx: Context) {
   c.effect(() => installPlannerRoute(c, (agent: any) => settings.effective(agent.session.header?.cwd).roles.planner, isPlanActive, isEnabled), 'plan-orchestrator: planner route')
   c.effect(() => installEnabledParentFence(c, orchestration, isEnabled), 'plan-orchestrator: parent fence')
 
-  // Wrap native plan-mode's pre-step handling: downstream first commits the
-  // selected plan state, then we enforce/restore the file sandbox before the request.
   c.on('agent/pre-step', async ({ agent }: any, next: any) => {
     const decision = await next()
     const effective = settings.effective(agent.session.header?.cwd)
@@ -114,8 +110,6 @@ export function apply(ctx: Context) {
     const staged = consumeApprovedPlanResult(bridge, exec, result, isEnabled)
     if (!staged) return
     const sessionId = String(exec.agent?.session?.id ?? '')
-    // Do NOT restore read-only here. Native plan-mode commits plan/mode=off at
-    // the next pre-step; the parent fence lets that commit happen then rejects.
     orchestration.approve({
       sessionId,
       agent: exec.agent,
@@ -130,8 +124,6 @@ export function apply(ctx: Context) {
     firstPolicySeen.delete(session)
     const enabled = settings.effective(session.header?.cwd).enabled
     if (!enabled) {
-      // Cleanup only: remove state previously owned by the plugin, then leave
-      // native Plan Mode untouched while Plan Orchestrator is disabled.
       bridge.clearSession(String(session.id))
       readOnly.deactivate(session, c.sandboxPolicy)
       return
@@ -147,7 +139,6 @@ export function apply(ctx: Context) {
     void orchestration.reconcileSession(agent).catch((error: any) => c.logger?.warn?.('plan-orchestrator recovery reconcile failed: %o', error))
   })
 
-  // Human command plane; absent command service is an allowed non-interactive composition.
   c.inject(['commands'], (scope: any) => scope.effect(() => installIssueCommand(scope, {
     settings: (cwd?: string) => settings.effective(cwd),
     orchestration,
@@ -161,12 +152,11 @@ export function apply(ctx: Context) {
       disposeTransport = registerRpc(scope.connection, {
         ctx: scope,
         isEnabled: () => settings.get().enabled,
+        canResume: () => settings.get().recovery.allowSafeResume,
         runList: ({ sessionId }: any) => orchestration.list(sessionId),
         runDetail: ({ runId }: any) => orchestration.detail(runId),
         runCancel: ({ runId }: any) => orchestration.cancel(runId),
-        runResume: ({ runId }: any) => settings.get().recovery.allowSafeResume
-          ? orchestration.resume(runId)
-          : Promise.resolve({ ok: false, reason: 'Safe resume is disabled in Settings → Plan Mode.' }),
+        runResume: ({ runId }: any) => orchestration.resume(runId),
         runCleanup: ({ runId }: any) => orchestration.cleanup(runId),
         externalPreflight: async (body: any) => {
           const cwd = typeof body.cwd === 'string' ? await repoRoot(body.cwd) : undefined
@@ -200,8 +190,6 @@ export function apply(ctx: Context) {
     return () => { disposed = true; disposeTransport?.() }
   }, 'plan-orchestrator: rpc'))
 
-  // Validate persisted routes when enabled. Disabling is also a hard runtime
-  // cancellation boundary, independent of the next agent event.
   settings.watch(value => {
     if (!value.enabled) {
       void orchestration.cancelAll('Plan Orchestrator disabled in settings').catch((error: any) => c.logger?.warn?.('plan-orchestrator disable cancellation failed: %o', error))
