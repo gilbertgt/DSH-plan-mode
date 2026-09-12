@@ -57,6 +57,7 @@ jobs:
             .artifacts/release-manifest.json
           if-no-files-found: error
           retention-days: 14
+          include-hidden-files: true
 
   stage:
     name: Stage exact artifact via npm OIDC
