@@ -43,6 +43,7 @@ export function registerRpc(connection: any, deps: any) {
             case 'run-cancel': data = await deps.runCancel?.({ runId: boundedId(input.runId, 'runId') }); break
             case 'run-resume':
               if (deps.isEnabled && !deps.isEnabled()) throw new Error('Plan Orchestrator is disabled in Settings → Plan Mode.')
+              if (deps.canResume && !deps.canResume()) throw new Error('Safe Resume is disabled in Settings → Plan Mode.')
               data = await deps.runResume?.({ runId: boundedId(input.runId, 'runId') })
               break
             case 'run-cleanup': data = await deps.runCleanup?.({ runId: boundedId(input.runId, 'runId') }); break
