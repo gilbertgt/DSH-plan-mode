@@ -1,0 +1,74 @@
+name: Secure npm release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: npm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    name: Verify exact package artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Require committed lockfile
+        run: test -f package-lock.json || { echo 'package-lock.json is required before release'; exit 1; }
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Unit and integration tests
+        run: npm test
+      - name: Type check
+        run: npm run typecheck
+      - name: Supported DSH compatibility
+        run: npm run compat:check
+        env:
+          DSH_VERSION_UNDER_TEST: 0.1.5-rc.1
+      - name: DSH rc.1 package E2E
+        run: npm run e2e:rc1
+        env:
+          PLANX_COEXISTENCE: '1'
+      - name: Verify release source
+        run: npm run release:source
+      - name: Build and verify exact tarball
+        run: npm run release:pack
+      - name: Upload verified release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-release-${{ github.ref_name }}
+          path: |
+            .artifacts/*.tgz
+            .artifacts/release-manifest.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Install staged-publishing npm CLI
+        if: ${{ vars.NPM_STAGE_ENABLED == 'true' }}
+        run: npm install --global 'npm@>=11.15.0 <12'
+      - name: Stage verified tarball via npm OIDC
+        if: ${{ vars.NPM_STAGE_ENABLED == 'true' }}
+        shell: bash
+        run: |
+          TARBALL="$(node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('.artifacts/release-manifest.json','utf8'));process.stdout.write('.artifacts/'+m.tarball)")"
+          npm stage publish "$TARBALL" --access public
+
+# Bootstrap behavior:
+# - Leave repository variable NPM_STAGE_ENABLED unset/false for the first npm release.
+# - This workflow then verifies and uploads the exact .tgz but does not publish it.
+# - Publish that one verified tarball manually with maintainer 2FA.
+# - Configure npm Trusted Publishing for this workflow with stage-only permission,
+#   then set NPM_STAGE_ENABLED=true for future tags.
+# - This workflow never falls back to direct `npm publish`.
