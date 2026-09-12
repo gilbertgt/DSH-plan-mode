@@ -6,7 +6,7 @@ export async function ghRaw(cwd:string,args:string[]){const r=await exec('gh',ar
 export async function gh(cwd:string,args:string[]){const raw=await ghRaw(cwd,args);return JSON.parse(raw||'null')}
 export async function ghRepository(cwd:string){await exec('gh',['auth','status'],{cwd,encoding:'utf8',windowsHide:true});return gh(cwd,['repo','view','--json','nameWithOwner,defaultBranchRef'])}
 export async function ghPreflight(cwd:string,repository:string){const actual=await ghRepository(cwd);if(actual?.nameWithOwner!==repository)throw new Error(`repository mismatch: ${actual?.nameWithOwner} != ${repository}`);return actual}
-export async function fetchIssue(cwd:string,issue:number){return gh(cwd,['issue','view',String(issue),'--json','number,state,url,body,author,authorAssociation,comments'])}
+export async function fetchIssue(cwd:string,issue:number){return gh(cwd,['issue','view',String(issue),'--json','number,state,url,body,author,comments'])}
 
 export async function ghRepositoryPermission(cwd:string,repository:string,login:string):Promise<'admin'|'maintain'|'write'|'triage'|'read'|undefined>{
  if(!/^[A-Za-z0-9-]{1,100}$/.test(login))return undefined
