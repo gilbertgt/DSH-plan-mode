@@ -1,0 +1,168 @@
+name: Recover v1.0.0 verified artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    name: Recover exact v1.0.0 artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout immutable v1.0.0 source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: v1.0.0
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify immutable release source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED_SHA="60d2b38511a4227815c3bcdb43e87d73fe871def"
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+
+          echo "Expected source: $EXPECTED_SHA"
+          echo "Actual source:   $ACTUAL_SHA"
+
+          test "$ACTUAL_SHA" = "$EXPECTED_SHA"
+
+          test "$(node -p "require('./package.json').name")" = "@gilbertgt/dsh-plan-orchestrator"
+          test "$(node -p "require('./package.json').version")" = "1.0.0"
+
+          test -z "$(git status --porcelain)"
+
+      - name: Setup exact release Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.19.0'
+
+      - name: Verify npm toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          test "$(node --version)" = "v22.19.0"
+          test "$(npm --version)" = "10.9.3"
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Unit and integration tests
+        run: npm test
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Supported DSH compatibility
+        run: npm run compat:check
+        env:
+          DSH_VERSION_UNDER_TEST: 0.1.5-rc.1
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify package policy
+        run: npm run pack:check
+
+      - name: Rebuild exact v1.0.0 tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p recovery-artifacts
+
+          npm pack \
+            --json \
+            --ignore-scripts \
+            --pack-destination recovery-artifacts \
+            > recovery-artifacts/pack.json
+
+          TARBALL="$(node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('recovery-artifacts/pack.json', 'utf8'))[0];
+            if (!p || !p.filename) throw new Error('npm pack returned no filename');
+            process.stdout.write(p.filename);
+          ")"
+
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+          test "$TARBALL" = "gilbertgt-dsh-plan-orchestrator-1.0.0.tgz"
+          test -f "recovery-artifacts/$TARBALL"
+
+      - name: Require exact original SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED="4700dbdb7912bb49d0f54383e9890e72041de6e5ba2ee266f2f7f75748206bb5"
+          ACTUAL="$(sha256sum "recovery-artifacts/$TARBALL" | awk '{print $1}')"
+
+          echo "Expected SHA-256: $EXPECTED"
+          echo "Actual SHA-256:   $ACTUAL"
+
+          test "$ACTUAL" = "$EXPECTED"
+
+          echo "$ACTUAL  $TARBALL" > recovery-artifacts/SHA256SUMS.txt
+
+      - name: DSH rc.1 exact-artifact E2E
+        shell: bash
+        env:
+          PLANX_COEXISTENCE: '1'
+        run: |
+          set -euo pipefail
+
+          export PLANX_TARBALL="../recovery-artifacts/$TARBALL"
+          npm run e2e:rc1
+
+      - name: Reverify exact SHA after E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED="4700dbdb7912bb49d0f54383e9890e72041de6e5ba2ee266f2f7f75748206bb5"
+          ACTUAL="$(sha256sum "recovery-artifacts/$TARBALL" | awk '{print $1}')"
+
+          test "$ACTUAL" = "$EXPECTED"
+
+      - name: Write recovery manifest
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const manifest = {
+            schemaVersion: 1,
+            purpose: "bootstrap-v1.0.0-artifact-recovery",
+            package: "@gilbertgt/dsh-plan-orchestrator",
+            version: "1.0.0",
+            tag: "v1.0.0",
+            sourceCommit: "60d2b38511a4227815c3bcdb43e87d73fe871def",
+            tarball: "gilbertgt-dsh-plan-orchestrator-1.0.0.tgz",
+            sha256: "4700dbdb7912bb49d0f54383e9890e72041de6e5ba2ee266f2f7f75748206bb5",
+            originalVerifiedRun: 34715073261
+          };
+
+          fs.writeFileSync(
+            "recovery-artifacts/recovery-manifest.json",
+            JSON.stringify(manifest, null, 2) + "\n"
+          );
+          NODE
+
+      - name: Upload recovered verified artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: npm-release-v1.0.0-recovered
+          path: |
+            recovery-artifacts/gilbertgt-dsh-plan-orchestrator-1.0.0.tgz
+            recovery-artifacts/recovery-manifest.json
+            recovery-artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
