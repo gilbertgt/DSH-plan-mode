@@ -11,6 +11,7 @@ import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import {
+  assertJsDependencyClosure,
   assertPackageManifest,
   assertPackageMetadata,
   scanPackageFiles,
@@ -50,6 +51,7 @@ if (packed.name !== pkg.name || packed.version !== pkg.version) {
 
 const npmManifest = packed.files.map(entry => entry.path)
 assertPackageManifest(npmManifest)
+assertJsDependencyClosure(root, npmManifest)
 scanPackageFiles(root, npmManifest)
 
 const tarball = join(artifacts, basename(packed.filename))
@@ -69,6 +71,7 @@ const extracted = mkdtempSync(join(tmpdir(), 'dsh-plan-release-'))
 try {
   execFileSync('tar', ['-xzf', tarball, '-C', extracted], { windowsHide: true, stdio: 'inherit' })
   const packageRoot = join(extracted, 'package')
+  assertJsDependencyClosure(packageRoot, tarManifest)
   scanPackageFiles(packageRoot, tarManifest)
   const extractedPkg = assertPackageMetadata(JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')))
   if (extractedPkg.name !== pkg.name || extractedPkg.version !== pkg.version) throw new Error('extracted package metadata mismatch')
@@ -87,6 +90,7 @@ try {
     ], { cwd: smokeRoot })
     const installed = join(smokeRoot, 'node_modules', '@gilbertgt', 'dsh-plan-orchestrator')
     assertPackageMetadata(JSON.parse(readFileSync(join(installed, 'package.json'), 'utf8')))
+    assertJsDependencyClosure(installed, tarManifest)
     for (const required of ['lib/index.js', 'lib/client.js', 'cordis.patch.yml']) {
       readFileSync(join(installed, ...required.split('/')))
     }
