@@ -83,6 +83,22 @@ export function assertPackageMetadata(pkg) {
   return pkg
 }
 
+export function assertLockMetadata(pkg, lock) {
+  if (!lock || typeof lock !== 'object') throw new Error('package-lock metadata is missing')
+  if (lock.name !== pkg.name || lock.version !== pkg.version) {
+    throw new Error(`package-lock metadata mismatch: ${lock.name}@${lock.version} != ${pkg.name}@${pkg.version}`)
+  }
+  return lock
+}
+
+export function assertReleaseRef(version, refType, refName) {
+  const expected = `v${version}`
+  if (refType !== 'tag' || refName !== expected) {
+    throw new Error(`release blocked: expected tag ${expected}, got ${refType ?? '<unset>'}:${refName ?? '<unset>'}`)
+  }
+  return expected
+}
+
 export function scanSensitiveText(text, label = '<text>') {
   if (typeof text !== 'string') throw new Error(`cannot scan non-text content: ${label}`)
   if (text.includes('\u0000')) throw new Error(`binary/NUL content is not allowed in release text file: ${label}`)
