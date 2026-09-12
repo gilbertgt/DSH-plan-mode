@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { plannerPolicyText, PLANNER_POLICY, COMPACT_PLANNER_REMINDER } from '../../src/planning/policy.ts'
+import { DEFAULT_SETTINGS } from '../../src/contract/settings.ts'
 import { createRpc } from '../../src/client/rpc-client.ts'
 
 test('Plan OFF and disabled states add zero planner contract text', () => {
@@ -10,6 +11,16 @@ test('Plan OFF and disabled states add zero planner contract text', () => {
   assert.equal(plannerPolicyText(true, true, true), PLANNER_POLICY)
   assert.equal(plannerPolicyText(true, true, false), COMPACT_PLANNER_REMINDER)
   assert.ok(COMPACT_PLANNER_REMINDER.length < PLANNER_POLICY.length / 4)
+})
+
+test('planner settings are runtime policy inputs rather than dead UI state',()=>{
+  const planning={...structuredClone(DEFAULT_SETTINGS.planning),adaptiveResearch:false,maxInitialReadFiles:3,softInputTokens:12345,progressiveDiscovery:false,requireExpansionReason:true}
+  const text=plannerPolicyText(true,true,true,planning)
+  assert.match(text,/Adaptive research is disabled/)
+  assert.match(text,/at most 3 files/)
+  assert.match(text,/12345 tokens/)
+  assert.match(text,/Progressive discovery is disabled/)
+  assert.match(text,/package\.json script/)
 })
 
 test('client RPC uses authenticated same-origin exact API route', async () => {
