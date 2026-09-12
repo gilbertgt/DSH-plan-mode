@@ -15,15 +15,7 @@ export const REQUIRED_PACKAGE_FILES = Object.freeze([
   'lib/client.js',
 ])
 
-const EXACT_ALLOWED = new Set([
-  'package.json',
-  'README.md',
-  'LICENSE',
-  'cordis.patch.yml',
-  'compatibility.json',
-  'profiles/worker.cordis.yml',
-  'profiles/reviewer.cordis.yml',
-])
+const EXACT_ALLOWED = new Set(REQUIRED_PACKAGE_FILES)
 
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
 
@@ -54,8 +46,7 @@ function normalizedPackagePath(input) {
 }
 
 export function isAllowedPackagePath(input) {
-  const path = normalizedPackagePath(input)
-  return EXACT_ALLOWED.has(path) || /^lib\/[^/]+\.js$/.test(path)
+  return EXACT_ALLOWED.has(normalizedPackagePath(input))
 }
 
 export function assertPackageManifest(paths) {
@@ -82,6 +73,9 @@ export function assertPackageMetadata(pkg) {
   if (pkg.main !== './lib/index.js') throw new Error(`unexpected package main: ${pkg.main}`)
   if (pkg.exports?.['.'] !== './lib/index.js' || pkg.exports?.['./client'] !== './lib/client.js') {
     throw new Error('package exports do not point at the expected built entry points')
+  }
+  if (pkg.repository?.url !== 'git+https://github.com/gilbertgt/DSH-plan-mode.git') {
+    throw new Error(`unexpected package repository URL: ${pkg.repository?.url}`)
   }
   return pkg
 }
