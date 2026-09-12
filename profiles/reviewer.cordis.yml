@@ -1,0 +1,5 @@
+# Overlay for a dedicated SDK Reviewer fallback. Reviewer work is strictly
+# read-only; the host also scopes visible tools so this is defense in depth.
+- id: sandbox-policy
+  config:
+    mode: read-only

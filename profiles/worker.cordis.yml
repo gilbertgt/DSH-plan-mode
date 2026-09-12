@@ -1,0 +1,5 @@
+# Overlay for worktree-isolated SDK Workers. The sdk profile already composes
+# dsh-base; this file only tightens the per-session filesystem policy.
+- id: sandbox-policy
+  config:
+    mode: workspace-write

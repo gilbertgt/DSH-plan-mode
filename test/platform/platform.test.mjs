@@ -1,0 +1,38 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { assertRepoPathConfined } from '../../src/git/repository.ts'
+import { minimalSdkEnv, sdkHarnessOptions } from '../../src/orchestration/sdk-backend.ts'
+
+test('platform supports CJK and spaces through Git machine output', async()=>{
+  const root=await mkdtemp(join(tmpdir(),'planx 平台 '))
+  execFileSync('git',['init'],{cwd:root,stdio:'ignore'})
+  execFileSync('git',['config','user.email','test@example.com'],{cwd:root})
+  execFileSync('git',['config','user.name','test'],{cwd:root})
+  await writeFile(join(root,'初始.txt'),'base')
+  execFileSync('git',['add','.'],{cwd:root});execFileSync('git',['commit','-m','base'],{cwd:root,stdio:'ignore'})
+  await writeFile(join(root,'韓文 이름.txt'),'x')
+  const out=execFileSync('git',['ls-files','--others','--exclude-standard','-z'],{cwd:root})
+  assert.match(out.toString('utf8'),/韓文 이름\.txt/)
+})
+
+test('SDK child launch options preserve worktree cwd and exact role route',()=>{
+  const req={cwd:process.platform==='win32'?'C:\\工作 樹\\task-1':'/tmp/工作 樹/task-1',profile:'worker',taskId:'task-1',prompt:'x',route:{provider:'p',model:'m',reasoningEffort:'high',maxTokens:1234}}
+  const out=sdkHarnessOptions(req)
+  assert.equal(out.cwd,req.cwd);assert.equal(out.profile,'worker');assert.equal(out.provider,'p');assert.equal(out.model,'m');assert.equal(out.maxTokens,1234);assert.equal(out.patches.length,1);assert.match(out.patches[0],/profiles[\\/]worker\.cordis\.yml$/)
+})
+
+test('symlink/junction escape is rejected (where platform permits symlinks)', async(t)=>{
+  const base=await mkdtemp(join(tmpdir(),'planx-boundary-')),root=join(base,'repo'),outside=join(base,'outside')
+  await mkdir(root);await mkdir(outside);execFileSync('git',['init'],{cwd:root,stdio:'ignore'})
+  try{await symlink(outside,join(root,'escape'),process.platform==='win32'?'junction':'dir')}catch(e){t.skip(`symlink unavailable: ${e.code??e}`);return}
+  await assert.rejects(()=>assertRepoPathConfined(root,'escape/file.txt'),/escapes repository/)
+})
+
+test('SDK environment scrubs unrelated secrets while retaining runtime and provider credentials',()=>{
+  const env=minimalSdkEnv({PATH:'/bin',OPENAI_API_KEY:'ok',COMMANDCODE_API_KEY:'goat',UNRELATED_SECRET:'nope',AWS_SECRET_ACCESS_KEY:'nope'})
+  assert.equal(env.OPENAI_API_KEY,'ok');assert.equal(env.COMMANDCODE_API_KEY,'goat');assert.equal(env.UNRELATED_SECRET,undefined);assert.equal(env.AWS_SECRET_ACCESS_KEY,undefined)
+})

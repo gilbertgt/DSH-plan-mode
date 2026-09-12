@@ -1,0 +1,110 @@
+name: CI
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      full_compat:
+        description: Run rc.2 preview compatibility lane
+        required: false
+        default: false
+        type: boolean
+concurrency:
+  group: plan-mode-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  quality:
+    name: Core + rc.1 release smoke / Ubuntu Node 22
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.19.0' }
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run pack:check
+      - run: npm run compat:check
+        env:
+          DSH_VERSION_UNDER_TEST: 0.1.5-rc.1
+      - run: npm run e2e:rc1
+        env:
+          PLANX_COEXISTENCE: '1'
+
+  windows-rc1:
+    name: Windows rc.1 package E2E / Node 22
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.19.0' }
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run test:platform
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run pack:check
+      - run: npm run e2e:rc1
+
+  platform-node24:
+    name: Platform ${{ matrix.os }} / Node 24
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      # Deliberately dependency-free: Node 22 release lanes already cover
+      # typecheck/build/package. This lane catches OS/Node machine behavior.
+      - run: npm run test:platform
+
+  compat-rc2:
+    name: DSH rc.2 preview (manual only)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_compat }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.19.0' }
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Overlay rc.2 API packages
+        run: >-
+          npm install --force --ignore-scripts --no-save
+          @deepseek-ai/dsh@0.1.5-rc.2
+          @deepseek-ai/dsh-agent@0.1.5-rc.2
+          @deepseek-ai/dsh-api-remotes@0.1.5-rc.2
+          @deepseek-ai/dsh-client-connection@0.1.5-rc.2
+          @deepseek-ai/dsh-client-locale@0.1.5-rc.2
+          @deepseek-ai/dsh-client-ui-conversation@0.1.5-rc.2
+          @deepseek-ai/dsh-client-ui-settings@0.1.5-rc.2
+          @deepseek-ai/dsh-client-ui-slots@0.1.5-rc.2
+          @deepseek-ai/dsh-llm@0.1.5-rc.2
+          @deepseek-ai/dsh-plan-mode@0.1.5-rc.2
+          @deepseek-ai/dsh-sandbox@0.1.5-rc.2
+          @deepseek-ai/dsh-sandbox-policy@0.1.5-rc.2
+          @deepseek-ai/dsh-sdk-client@0.1.5-rc.2
+          @deepseek-ai/dsh-session@0.1.5-rc.2
+          @deepseek-ai/dsh-session-projection@0.1.5-rc.2
+          @deepseek-ai/dsh-settings@0.1.5-rc.2
+          @deepseek-ai/dsh-subagent@0.1.5-rc.2
+          @deepseek-ai/dsh-system-prompt@0.1.5-rc.2
+          @deepseek-ai/dsh-tools@0.1.5-rc.2
+          @deepseek-ai/dsh-commands@0.1.5-rc.2
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run compat:check
+        env:
+          DSH_VERSION_UNDER_TEST: 0.1.5-rc.2
+          DSH_COMPAT_MODE: preview
+# External Issue tests use local fake/mocked boundaries; ordinary CI never
+# creates a real GitHub PR. rc.2 is manual and non-blocking until promoted.

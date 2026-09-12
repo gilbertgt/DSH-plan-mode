@@ -1,0 +1,1 @@
+export function assertNonDestructiveRecoveryCommand(command:string){if(/git\s+(reset\s+--hard|clean\s+-|stash)|force.?push/i.test(command))throw new Error('destructive recovery command is forbidden');return command}
