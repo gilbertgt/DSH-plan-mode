@@ -112,9 +112,9 @@ export function stripTarPackagePrefix(entries) {
   for (const raw of entries) {
     if (typeof raw !== 'string' || raw.length === 0) continue
     if (raw.includes('\\') || raw.startsWith('/') || raw.includes('../')) throw new Error(`unsafe tar entry: ${raw}`)
-    if (raw === 'package/' || raw === 'package') continue
+    if (raw === 'package/' || raw === 'package' || raw.endsWith('/')) continue
     if (!raw.startsWith('package/')) throw new Error(`tar entry missing package/ prefix: ${raw}`)
-    const stripped = raw.slice('package/'.length).replace(/\/$/, '')
+    const stripped = raw.slice('package/'.length)
     if (stripped) paths.push(stripped)
   }
   return paths
