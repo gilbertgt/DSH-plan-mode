@@ -79,8 +79,13 @@ try {
     if (!packedPaths.has(required)) throw new Error(`tarball missing ${required}`)
   }
 
-  // Real install into a fresh named profile. The npm-script PATH contains the
-  // pinned local pnpm binary used by DSH's plugin manager.
+  // Create a fresh custom Web profile from DSH's shipped rc.1 template before
+  // installing the out-of-tree plugin. `dsh plugin` alone initializes a base
+  // profile, which has no Web listener to exercise in the boot smoke below.
+  dsh(['--profile', profile, '--from-default-profile', 'web', '--help'])
+
+  // Real install into the fresh named Web profile. The npm-script PATH contains
+  // the pinned local pnpm binary used by DSH's plugin manager.
   dsh(['plugin', '--profile', profile, 'add', tarball, '--ignore-scripts'])
   const dump = dsh(['--profile', profile, '--dump-config'])
   assertIncludes(dump, '@gilbertgt/dsh-plan-orchestrator', 'installed profile')
