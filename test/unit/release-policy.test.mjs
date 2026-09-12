@@ -27,6 +27,7 @@ const validPkg = {
   main: './lib/index.js',
   exports: { '.': './lib/index.js', './client': './lib/client.js' },
   publishConfig: { access: 'public' },
+  repository: { type: 'git', url: 'git+https://github.com/gilbertgt/DSH-plan-mode.git' },
 }
 
 test('package manifest is fail-closed', () => {
@@ -39,6 +40,7 @@ test('package manifest is fail-closed', () => {
     'private.key',
     'archive.tgz',
     'test/fixture.json',
+    'lib/unexpected.js',
   ]) {
     assert.throws(() => assertPackageManifest([...validManifest, forbidden]), /unexpected package file/)
   }
@@ -50,6 +52,10 @@ test('package metadata accepts future versions without hard-coding 1.0.0', () =>
   assert.equal(assertPackageMetadata({ ...validPkg, version: '2.0.0-rc.1' }).version, '2.0.0-rc.1')
   assert.throws(() => assertPackageMetadata({ ...validPkg, version: 'banana' }), /invalid package version/)
   assert.throws(() => assertPackageMetadata({ ...validPkg, publishConfig: undefined }), /publishConfig\.access must be public/)
+  assert.throws(
+    () => assertPackageMetadata({ ...validPkg, repository: { url: 'https://github.com/example/wrong.git' } }),
+    /unexpected package repository URL/,
+  )
 })
 
 test('lock metadata and release tag must match package version', () => {
