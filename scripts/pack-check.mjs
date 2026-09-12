@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
+  assertJsDependencyClosure,
   assertPackageManifest,
   assertPackageMetadata,
   scanPackageFiles,
@@ -25,6 +26,7 @@ if (result.name !== pkg.name || result.version !== pkg.version) {
 
 const paths = result.files.map(entry => entry.path)
 assertPackageManifest(paths)
+assertJsDependencyClosure(root, paths)
 scanPackageFiles(root, paths)
 
 console.log(`pack policy OK (${paths.length} files, ${pkg.name}@${pkg.version})`)
