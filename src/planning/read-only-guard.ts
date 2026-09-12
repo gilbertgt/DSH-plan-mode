@@ -1,0 +1,11 @@
+import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
+const MUTATION_NAMES = /^(write|write_file|edit|edit_file|apply_patch|patch|delete|move|rename|mkdir|bash|pwsh|shell|run_code)$/i
+interface Override { previousEffective:'read-only'|'workspace-write'|'danger-full-access'; previousOverride?:'read-only'|'workspace-write'|'danger-full-access'; markerCount:number }
+export class PlannerReadOnlyGuard {
+  #active=new Map<string,Override>(); #degraded=new Map<string,string>()
+  activate(session:any, sandboxPolicy:any){const sid=String(session.id);if(this.#active.has(sid))return;try{const previousEffective=sandboxPolicy.resolve({session}).mode,previousOverride=sandboxPolicy.overrideOf(session);setSandboxMode(session,'read-only');const markerCount=this.modeEvents(session).length;this.#active.set(sid,{previousEffective,previousOverride,markerCount})}catch(e){this.#degraded.set(sid,`sandbox override unavailable: ${(e as Error).message}`);this.#active.set(sid,{previousEffective:'read-only',markerCount:-1})}}
+  deactivate(session:any, sandboxPolicy:any){const sid=String(session.id),owned=this.#active.get(sid);if(!owned)return;this.#active.delete(sid);try{if(owned.markerCount<0)return;const events=this.modeEvents(session);const last=events.at(-1);const stillOurs=events.length===owned.markerCount&&last?.data?.mode==='read-only';if(!stillOurs)return;const target=owned.previousOverride??owned.previousEffective;if(sandboxPolicy.resolve({session}).mode==='read-only')setSandboxMode(session,target)}catch(e){this.#degraded.set(sid,`sandbox restore skipped: ${(e as Error).message}`)}}
+  active(sessionId:string){return this.#active.has(sessionId)} degraded(sessionId:string){return this.#degraded.get(sessionId)} markDegraded(sessionId:string,reason:string){this.#degraded.set(sessionId,reason)}
+  install(ctx:any){return ctx.on('tools/pre-execute',async(exec:any,next:any)=>{const sid=String(exec.agent?.session?.id??'');if(!this.active(sid))return next();if(MUTATION_NAMES.test(String(exec.name)))return{kind:'deny',reason:'Plan Mode is strict read-only; repository mutation is blocked until approval.'};return next()})}
+  private modeEvents(session:any){return (session.snapshotEvents?.()??[]).filter((e:any)=>e.type==='sandbox/mode')}
+}

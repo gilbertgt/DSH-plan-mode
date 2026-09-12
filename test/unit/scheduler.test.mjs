@@ -1,0 +1,5 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {buildWaves,recheckWave} from '../../src/orchestration/scheduler.ts'
+const task=(id,modify,deps=[],parallelSafe=true)=>({id,title:id,objective:id,read:[],modify,decisionLocks:[],requiredChanges:[],acceptanceCriteria:['ok'],validation:[],dependsOn:deps,parallelSafe})
+const p=(tasks)=>({planModeVersion:1,summary:'x',complexity:'large',decisionLocks:[],tasks,validationStrategy:[],validationCommands:[],risks:[],outOfScope:[]})
+test('parallelizes only disjoint safe ready tasks deterministically',()=>{const plan=p([task('a',['a']),task('b',['b']),task('c',['c'],['a'])]);const w=buildWaves(plan,3,'auto','linux');assert.deepEqual(w,[{mode:'parallel',taskIds:['a','b']},{mode:'serial',taskIds:['c']}]);assert.ok(recheckWave(plan,w[0],'linux'))})
+test('overlap and unsafe fall back serial',()=>{const w=buildWaves(p([task('a',['x']),task('b',['x']),task('c',['z'],[],false)]),3,'auto','linux');assert.ok(w.every(x=>x.mode==='serial'))})

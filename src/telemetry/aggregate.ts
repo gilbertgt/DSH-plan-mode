@@ -1,0 +1,3 @@
+import type { UsageSample } from './usage.ts'
+export function aggregateUsage(samples:UsageSample[]){const sum=(k:keyof UsageSample)=>{const vals=samples.map(s=>s[k]).filter((v):v is number=>typeof v==='number');return vals.length&&vals.length===samples.length?vals.reduce((a,b)=>a+b,0):undefined};return{input:sum('input'),uncachedInput:sum('uncachedInput'),cacheRead:sum('cacheRead'),cacheWrite:sum('cacheWrite'),output:sum('output'),turns:sum('turns'),durationMs:sum('durationMs'),costUsd:undefined,samples}}
+export function softBudgetExceeded(sample:UsageSample,budget:number){return typeof sample.input==='number'&&sample.input>budget}

@@ -1,0 +1,9 @@
+{
+  "latestTested": "0.1.5-rc.1",
+  "supported": [
+    "0.1.5-rc.1"
+  ],
+  "preview": [
+    "0.1.5-rc.2"
+  ]
+}

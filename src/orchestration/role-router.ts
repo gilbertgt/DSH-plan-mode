@@ -1,0 +1,4 @@
+import type { RoleName, RoleRoute, RouteChoice } from '../contract/settings.ts'
+export function routeChoices(route:RoleRoute,current:RouteChoice):RouteChoice[]{const primary=route.mode==='current'?current:{provider:route.provider!,model:route.model!,reasoningEffort:route.reasoningEffort,maxTokens:route.maxTokens};return [primary,...route.fallbacks].filter((v,i,a)=>v.provider&&v.model&&a.findIndex(x=>x.provider===v.provider&&x.model===v.model&&x.reasoningEffort===v.reasoningEffort)===i)}
+export async function preflightRoute(llm:any, choice:RouteChoice){if(typeof llm?.resolveCallConfig!=='function')throw new Error('llm.resolveCallConfig unavailable');await llm.resolveCallConfig(choice);return choice}
+export function roleLabel(role:RoleName,taskId?:string){return taskId?`${role}:${taskId}`:role}

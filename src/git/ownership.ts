@@ -1,0 +1,3 @@
+import { schedulerPathIdentity } from '../contract/plan-artifact.ts'
+export function assertOwnedPaths(changed:string[], allowed:string[], platform:NodeJS.Platform=process.platform){const set=new Set(allowed.map(p=>schedulerPathIdentity(p,platform)));const outside=changed.filter(p=>!set.has(schedulerPathIdentity(p,platform)));if(outside.length)throw new Error(`ownership violation: ${outside.join(', ')}`);return true}
+export function disjointOwnership(a:string[],b:string[],platform:NodeJS.Platform=process.platform){const set=new Set(a.map(p=>schedulerPathIdentity(p,platform)));return !b.some(p=>set.has(schedulerPathIdentity(p,platform)))}

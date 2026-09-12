@@ -1,0 +1,3 @@
+- insert:
+    - id: plan-orchestrator
+      name: '@gilbertgt/dsh-plan-orchestrator'

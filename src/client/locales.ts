@@ -1,0 +1,2 @@
+export const zh={nav:'Plan Mode',overview:'總覽',roles:'角色模型',planning:'規劃',execution:'執行',review:'審查',recovery:'恢復',external:'External Issue',diagnostics:'進階／診斷',loading:'載入中…',save:'儲存',stop:'停止',resume:'安全恢復'}
+export const en={nav:'Plan Mode',overview:'Overview',roles:'Roles',planning:'Planning',execution:'Execution',review:'Review',recovery:'Recovery',external:'External Issue',diagnostics:'Diagnostics',loading:'Loading…',save:'Save',stop:'Stop',resume:'Resume safely'}
