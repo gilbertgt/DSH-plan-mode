@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  assertLockMetadata,
   assertPackageManifest,
   assertPackageMetadata,
+  assertReleaseRef,
   scanSensitiveText,
   stripTarPackagePrefix,
 } from '../../scripts/release-policy.mjs'
@@ -29,8 +31,17 @@ const validPkg = {
 
 test('package manifest is fail-closed', () => {
   assert.doesNotThrow(() => assertPackageManifest(validManifest))
-  assert.throws(() => assertPackageManifest([...validManifest, 'src/index.ts']), /unexpected package file/)
-  assert.throws(() => assertPackageManifest([...validManifest, 'lib/client.js.map']), /unexpected package file/)
+  for (const forbidden of [
+    'src/index.ts',
+    'lib/client.js.map',
+    '.env',
+    '.npmrc',
+    'private.key',
+    'archive.tgz',
+    'test/fixture.json',
+  ]) {
+    assert.throws(() => assertPackageManifest([...validManifest, forbidden]), /unexpected package file/)
+  }
   assert.throws(() => assertPackageManifest(validManifest.filter(path => path !== 'lib/index.js')), /missing lib\/index\.js/)
 })
 
@@ -39,6 +50,14 @@ test('package metadata accepts future versions without hard-coding 1.0.0', () =>
   assert.equal(assertPackageMetadata({ ...validPkg, version: '2.0.0-rc.1' }).version, '2.0.0-rc.1')
   assert.throws(() => assertPackageMetadata({ ...validPkg, version: 'banana' }), /invalid package version/)
   assert.throws(() => assertPackageMetadata({ ...validPkg, publishConfig: undefined }), /publishConfig\.access must be public/)
+})
+
+test('lock metadata and release tag must match package version', () => {
+  assert.doesNotThrow(() => assertLockMetadata(validPkg, { name: validPkg.name, version: validPkg.version }))
+  assert.throws(() => assertLockMetadata(validPkg, { name: validPkg.name, version: '1.2.4' }), /package-lock metadata mismatch/)
+  assert.equal(assertReleaseRef(validPkg.version, 'tag', 'v1.2.3'), 'v1.2.3')
+  assert.throws(() => assertReleaseRef(validPkg.version, 'branch', 'main'), /expected tag v1\.2\.3/)
+  assert.throws(() => assertReleaseRef(validPkg.version, 'tag', 'v1.2.4'), /expected tag v1\.2\.3/)
 })
 
 test('scanner catches high-confidence credentials and private key material', () => {
