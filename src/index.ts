@@ -15,10 +15,12 @@ import { RunStore } from './recovery/store.ts'
 import { installIssueCommand } from './external/issue-command.ts'
 import { ghPreflight } from './external/github.ts'
 import { repoRoot } from './git/repository.ts'
+import { configureValidationShell } from './validation/runner.ts'
+import { configureRoleTimeoutResolver } from './runtime-policy.ts'
 import type { RoleRoute } from './contract/settings.ts'
 
 export const name = 'plan-orchestrator'
-export const inject = ['settings', 'tools', 'llm', 'sessions', 'subagents', 'systemPrompt', 'sandboxPolicy', 'sessionProjections']
+export const inject = ['settings', 'tools', 'llm', 'sessions', 'subagents', 'systemPrompt', 'sandboxPolicy', 'sessionProjections', 'shell']
 
 const execFileP = promisify(execFile)
 const require = createRequire(import.meta.url)
@@ -61,6 +63,9 @@ export function apply(ctx: Context) {
   const isEnabled = (agent: any): boolean => Boolean(agent && settings.effective(agent.session?.header?.cwd).enabled)
   const firstPolicySeen = new WeakSet<object>()
 
+  c.effect(() => configureValidationShell(c.shell), 'plan-orchestrator: sandbox validation runtime')
+  c.effect(() => configureRoleTimeoutResolver((cwd?: string) => settings.effective(cwd).execution.roleTimeoutMs), 'plan-orchestrator: role timeout runtime')
+
   c.systemPrompt.section({
     name: 'plan-orchestrator:policy',
     order: (c.systemPrompt.getSectionOrder?.('PLAN_POLICY') ?? 500) + 1,
@@ -74,7 +79,7 @@ export function apply(ctx: Context) {
       }
       const active = isPlanActive(agent)
       const first = !firstPolicySeen.has(session)
-      const text = plannerPolicyText(true, active, first)
+      const text = plannerPolicyText(true, active, first, effective.planning)
       if (text && first) firstPolicySeen.add(session)
       return text
     },
@@ -85,8 +90,6 @@ export function apply(ctx: Context) {
   c.effect(() => installPlannerRoute(c, (agent: any) => settings.effective(agent.session.header?.cwd).roles.planner, isPlanActive, isEnabled), 'plan-orchestrator: planner route')
   c.effect(() => installEnabledParentFence(c, orchestration, isEnabled), 'plan-orchestrator: parent fence')
 
-  // Wrap native plan-mode's pre-step handling: downstream first commits the
-  // selected plan state, then we enforce/restore the file sandbox before the request.
   c.on('agent/pre-step', async ({ agent }: any, next: any) => {
     const decision = await next()
     const effective = settings.effective(agent.session.header?.cwd)
@@ -107,8 +110,6 @@ export function apply(ctx: Context) {
     const staged = consumeApprovedPlanResult(bridge, exec, result, isEnabled)
     if (!staged) return
     const sessionId = String(exec.agent?.session?.id ?? '')
-    // Do NOT restore read-only here. Native plan-mode commits plan/mode=off at
-    // the next pre-step; the parent fence lets that commit happen then rejects.
     orchestration.approve({
       sessionId,
       agent: exec.agent,
@@ -123,8 +124,6 @@ export function apply(ctx: Context) {
     firstPolicySeen.delete(session)
     const enabled = settings.effective(session.header?.cwd).enabled
     if (!enabled) {
-      // Cleanup only: remove state previously owned by the plugin, then leave
-      // native Plan Mode untouched while Plan Orchestrator is disabled.
       bridge.clearSession(String(session.id))
       readOnly.deactivate(session, c.sandboxPolicy)
       return
@@ -140,7 +139,6 @@ export function apply(ctx: Context) {
     void orchestration.reconcileSession(agent).catch((error: any) => c.logger?.warn?.('plan-orchestrator recovery reconcile failed: %o', error))
   })
 
-  // Human command plane; absent command service is an allowed non-interactive composition.
   c.inject(['commands'], (scope: any) => scope.effect(() => installIssueCommand(scope, {
     settings: (cwd?: string) => settings.effective(cwd),
     orchestration,
@@ -154,6 +152,7 @@ export function apply(ctx: Context) {
       disposeTransport = registerRpc(scope.connection, {
         ctx: scope,
         isEnabled: () => settings.get().enabled,
+        canResume: () => settings.get().recovery.allowSafeResume,
         runList: ({ sessionId }: any) => orchestration.list(sessionId),
         runDetail: ({ runId }: any) => orchestration.detail(runId),
         runCancel: ({ runId }: any) => orchestration.cancel(runId),
@@ -191,10 +190,11 @@ export function apply(ctx: Context) {
     return () => { disposed = true; disposeTransport?.() }
   }, 'plan-orchestrator: rpc'))
 
-  // Validate already-persisted fixed routes eagerly when settings change, but
-  // never mutate them silently if an adapter disappears.
   settings.watch(value => {
-    if (!value.enabled) return
+    if (!value.enabled) {
+      void orchestration.cancelAll('Plan Orchestrator disabled in settings').catch((error: any) => c.logger?.warn?.('plan-orchestrator disable cancellation failed: %o', error))
+      return
+    }
     for (const role of Object.values(value.roles) as RoleRoute[]) {
       if (role.mode === 'fixed') void validateFixedRoute(c.llm, role).catch((error: any) => c.logger?.warn?.('plan-orchestrator fixed route unavailable: %s', error.message))
     }

@@ -35,6 +35,7 @@ test('RPC blocks run-resume while disabled but preserves cleanup/control operati
   registerRpc(connection, {
     ctx: {},
     isEnabled: () => false,
+    canResume: () => true,
     runResume: async () => { resumeCalls++; return { ok: true } },
     runCancel: async ({ runId }) => { cancelCalls++; return { ok: true, runId } },
   })
@@ -59,4 +60,19 @@ test('RPC blocks run-resume while disabled but preserves cleanup/control operati
   assert.equal(cancel.status, 200)
   assert.deepEqual(await cancel.json(), { ok: true, data: { ok: true, runId: 'r1' } })
   assert.equal(cancelCalls, 1)
+})
+
+test('RPC blocks run-resume when Safe Resume is disabled even while orchestrator is enabled',async()=>{
+  const routes=new Map()
+  const connection={fetch:{register(definition){routes.set(definition.path,definition.fetch);return()=>{}}}}
+  let resumeCalls=0
+  registerRpc(connection,{
+    ctx:{},isEnabled:()=>true,canResume:()=>false,
+    runResume:async()=>{resumeCalls++;return{ok:true}},
+  })
+  const response=await routes.get('/api/plan-orchestrator/run-resume')(new Request('http://localhost/api/plan-orchestrator/run-resume',{
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({runId:'r1'}),
+  }))
+  assert.equal(response.status,400)
+  const body=await response.json();assert.equal(body.ok,false);assert.match(body.error.message,/Safe Resume is disabled/);assert.equal(resumeCalls,0)
 })

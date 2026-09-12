@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { extractCompletionEvidence, extractExternalContracts, selectTrustedRevision } from './contract.ts'
-import { fetchIssue, ghPreflight, prepareIssueBranch, remotePr } from './github.ts'
+import { fetchIssue, ghPreflight, ghRepository, prepareIssueBranch, remotePr, trustedIssueTexts } from './github.ts'
 import { findCurrentCompletion } from './continuation.ts'
 
 export function parseIssueCommand(text:string){
@@ -34,11 +34,19 @@ export function installIssueCommand(ctx:any,deps:{settings:(cwd?:string)=>any;or
         const settings=deps.settings(cwd)
         if(!settings.enabled)return{kind:'error',text:'Plan Orchestrator is disabled in Settings → Plan Mode.'}
         if(!settings.externalIssue.enabled)return{kind:'error',text:'External Issue Mode is disabled in Settings → Plan Mode.'}
+
+        const actual=await ghRepository(cwd)
+        const repository=String(actual?.nameWithOwner??'')
+        if(!repository)throw new Error('current GitHub repository identity unavailable')
         const issue=await fetchIssue(cwd,issueNumber)
-        const texts=[String(issue?.body??''),...(issue?.comments??[]).map((c:any)=>String(c?.body??''))]
-        const contracts=texts.flatMap(extractExternalContracts)
+        const texts=await trustedIssueTexts(cwd,repository,issue)
+        if(texts.length===0)throw new Error('no issue body/comment from a repository writer, maintainer, or admin')
+        const contracts=texts.flatMap(extractExternalContracts).filter(contract=>contract.externalPlan.repository===repository)
         const selected=selectTrustedRevision(contracts)
         await ghPreflight(cwd,selected.externalPlan.repository)
+
+        // Completion evidence is filtered by the same actor-permission boundary
+        // as executable PlanArtifacts; public commenters cannot forge state.
         const evidence=texts.flatMap(extractCompletionEvidence)
         const current=await findCurrentCompletion(evidence,{
           revision:selected.externalPlan.revision,

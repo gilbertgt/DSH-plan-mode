@@ -1,26 +1,24 @@
 import type { OrchestrationService } from './service.ts'
 
 /**
- * Runtime-gated parent fence. The plugin may stay installed while Enabled is
- * toggled live, so every event must re-check the current effective setting.
- * A pending approved handoff is cancelled when disabled to prevent a stale
- * plan from launching if the user later turns the plugin back on.
+ * Runtime-gated parent fence. Enabled OFF is a hard execution boundary: every
+ * event re-checks settings, pending and active plugin-owned runs are cancelled,
+ * then the native DSH flow is allowed through unchanged.
  */
 export function installEnabledParentFence(
   ctx: any,
   service: OrchestrationService,
   isEnabled: (agent: any) => boolean,
 ) {
-  const cancelPending = async (agent: any) => {
+  const cancelOwnedRun = async (agent: any) => {
     const sessionId = String(agent?.session?.id ?? '')
-    if (!sessionId || !service.shouldFence(sessionId)) return
-    const runId = service.activeRun(sessionId)
-    if (runId) await service.cancel(runId)
+    if (!sessionId) return
+    await service.cancelSession(sessionId, 'Plan Orchestrator disabled')
   }
 
   const preStep = ctx.on('agent/pre-step', async ({ agent }: any, next: any) => {
     if (!isEnabled(agent)) {
-      await cancelPending(agent)
+      await cancelOwnedRun(agent)
       return next()
     }
     const sessionId = String(agent.session.id)
@@ -31,8 +29,8 @@ export function installEnabledParentFence(
 
   const status = ctx.on('agent/status', ({ agent, status }: any) => {
     if (!isEnabled(agent)) {
-      void cancelPending(agent).catch((error: any) => {
-        ctx.logger?.warn?.('plan-orchestrator pending handoff cleanup failed: %o', error)
+      void cancelOwnedRun(agent).catch((error: any) => {
+        ctx.logger?.warn?.('plan-orchestrator run cleanup after disable failed: %o', error)
       })
       return
     }

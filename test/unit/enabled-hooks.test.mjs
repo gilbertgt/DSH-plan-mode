@@ -12,10 +12,10 @@ const artifact = {
   decisionLocks: [],
   tasks: [{
     id: 't1', title: 't', objective: 'o', read: ['src/a.ts'], modify: ['src/a.ts'], decisionLocks: [],
-    requiredChanges: ['x'], acceptanceCriteria: ['passes'], validation: ['node test'], dependsOn: [], parallelSafe: false,
+    requiredChanges: ['x'], acceptanceCriteria: ['passes'], validation: ['npm test'], dependsOn: [], parallelSafe: false,
   }],
   validationStrategy: [],
-  validationCommands: [{ id: 'unit', taskIds: ['t1'], command: 'node --test', timeoutMs: 1000 }],
+  validationCommands: [{ id: 'unit', taskIds: ['t1'], command: 'npm test', timeoutMs: 1000 }],
   risks: [],
   outOfScope: [],
 }
@@ -113,15 +113,14 @@ test('strict read-only tool guard does not block native tools while disabled', a
   assert.equal(blocked.kind, 'deny')
 })
 
-test('parent fence passes through and cancels stale pending handoff while disabled', async () => {
+test('parent fence passes through and cancels pending or active plugin run while disabled', async () => {
   let enabled = false
   let cancelled = 0
   let idleLaunches = 0
   let pending = true
   const service = {
     shouldFence: () => pending,
-    activeRun: () => pending ? 'r1' : undefined,
-    cancel: async () => { cancelled++; pending = false; return true },
+    cancelSession: async () => { cancelled++; pending = false; return true },
     onParentIdle: async () => { idleLaunches++; return true },
   }
   const { ctx, handlers } = captureContext({ logger: { warn() {}, error() {} } })

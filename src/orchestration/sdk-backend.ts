@@ -3,6 +3,7 @@ import { dirname, join, resolve, basename } from 'node:path'
 import type { RouteChoice } from '../contract/settings.ts'
 import { validateRoleResult, type RoleResult } from '../contract/role-result.ts'
 import { usageFromSdkEvents, type UsageSample } from '../telemetry/usage.ts'
+import { withRoleTimeout } from '../runtime-policy.ts'
 
 export type SdkRoleExecutionResult = RoleResult & { __usage?: UsageSample }
 export interface SdkRunRequest {
@@ -66,7 +67,8 @@ export function sdkHarnessOptions(req: SdkRunRequest) {
 
 export class SdkWorkspaceBackend {
   async run(req: SdkRunRequest): Promise<SdkRoleExecutionResult> {
-    req.signal.throwIfAborted()
+    const signal = withRoleTimeout(req.cwd, req.signal)
+    signal.throwIfAborted()
     const { DeepSeekHarness } = await import('@deepseek-ai/dsh-sdk-client')
     const harness = new DeepSeekHarness(sdkHarnessOptions(req))
     const started = Date.now()
@@ -76,8 +78,8 @@ export class SdkWorkspaceBackend {
         void harness.close().catch(() => {})
         reject(new DOMException('SDK worker aborted', 'AbortError'))
       }
-      req.signal.addEventListener('abort', onAbort, { once: true })
-      abortClose = () => req.signal.removeEventListener('abort', onAbort)
+      signal.addEventListener('abort', onAbort, { once: true })
+      abortClose = () => signal.removeEventListener('abort', onAbort)
     })
     try {
       const result = await Promise.race([harness.run(req.prompt), abortPromise])

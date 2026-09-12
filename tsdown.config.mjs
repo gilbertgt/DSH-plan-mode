@@ -3,8 +3,7 @@ const id = '@gilbertgt/dsh-plan-orchestrator'
 const hostExternal = [
   '@deepseek-ai/cordis','@deepseek-ai/dsh-agent','@deepseek-ai/dsh-llm','@deepseek-ai/dsh-plan-mode',
   '@deepseek-ai/dsh-settings','@deepseek-ai/dsh-subagent','@deepseek-ai/dsh-tools','@deepseek-ai/dsh-sdk-client',
-  '@deepseek-ai/dsh-session','@deepseek-ai/dsh-session-projection','@deepseek-ai/dsh-system-prompt','@deepseek-ai/dsh-commands','zod',
-  '@deepseek-ai/schemastery'
+  '@deepseek-ai/dsh-session','@deepseek-ai/dsh-session-projection','@deepseek-ai/dsh-system-prompt','@deepseek-ai/dsh-commands','zod'
 ]
 const clientExternal = ['react','react/jsx-runtime','react-dom','@deepseek-ai/cordis','@deepseek-ai/dsh-client-ui-slots']
 export default defineConfig([

@@ -33,19 +33,24 @@ export interface RunView extends RunProjection {
   changedPaths?: string[]
 }
 
-interface Pending { runId: string; launch: OrchestratorLaunch; persisted: Promise<void> }
+interface Pending { runId: string; launch: OrchestratorLaunch; persisted: Promise<void>; cancelled: boolean }
+
+type OrchestratorRunner = (launch: OrchestratorLaunch, runId: string, signal: AbortSignal) => Promise<void>
 
 export class OrchestrationService {
+  readonly store: RunStore
+  readonly runner: OrchestratorRunner
   #active = new Map<string, Promise<void>>()
+  #activeRun = new Map<string, string>()
   #pending = new Map<string, Pending>()
   #controllers = new Map<string, AbortController>()
   #views = new Map<string, RunView>()
   #agents = new Map<string, any>()
 
-  constructor(
-    readonly store: RunStore,
-    readonly runner: (launch: OrchestratorLaunch, runId: string, signal: AbortSignal) => Promise<void>,
-  ) {}
+  constructor(store: RunStore, runner: OrchestratorRunner) {
+    this.store = store
+    this.runner = runner
+  }
 
   approve(launch: OrchestratorLaunch): string | false {
     if (this.#pending.has(launch.sessionId) || this.#active.has(launch.sessionId)) return false
@@ -73,13 +78,13 @@ export class OrchestrationService {
       at: now,
     })
     const persisted = this.persistApproval(launch, runId, now)
-    this.#pending.set(launch.sessionId, { runId, launch, persisted })
+    this.#pending.set(launch.sessionId, { runId, launch, persisted, cancelled: false })
     if (launch.agent.status === 'idle') queueMicrotask(() => void this.onParentIdle(launch.sessionId))
     return runId
   }
 
   shouldFence(sessionId: string): boolean { return this.#pending.has(sessionId) }
-  activeRun(sessionId: string): string | undefined { return this.#pending.get(sessionId)?.runId ?? this.list(sessionId).find(v => this.#active.has(sessionId))?.runId }
+  activeRun(sessionId: string): string | undefined { return this.#pending.get(sessionId)?.runId ?? this.#activeRun.get(sessionId) }
 
   list(sessionId?: string): RunView[] {
     return [...this.#views.values()]
@@ -136,45 +141,67 @@ export class OrchestrationService {
     view.updatedAt = now
   }
 
-  async cancel(runId: string): Promise<boolean> {
+  async cancel(runId: string, reason = 'user requested stop'): Promise<boolean> {
     const view = this.#views.get(runId)
     if (!view) return false
-    const pending = this.#pending.get(view.sessionId)
+    const sessionId = view.sessionId
+    const pending = this.#pending.get(sessionId)
     if (pending?.runId === runId) {
-      this.#pending.delete(view.sessionId)
-      view.phase = 'CANCELLED'
-      view.status = 'CANCELLED'
-      view.updatedAt = new Date().toISOString()
-      this.append(this.#agents.get(view.sessionId)?.session, 'planx/run-terminal', {
-        runId, phase: 'CANCELLED', message: 'Stopped before execution started', at: view.updatedAt,
-      })
-      const manifest = await this.store.readManifest(view.sessionId, runId).catch(() => undefined)
-      if (manifest) {
-        manifest.phase = 'CANCELLED'
-        manifest.terminal = true
-        await this.store.writeManifest(manifest)
+      pending.cancelled = true
+      let persistError: unknown
+      try { await pending.persisted } catch (error) { persistError = error }
+
+      const controller = this.#controllers.get(runId)
+      const active = this.#active.get(sessionId)
+      if (controller && active) {
+        if (!controller.signal.aborted) controller.abort(reason)
+        await active.catch(() => {})
+      } else {
+        await this.markCancelled(view, reason, persistError)
       }
+      if (this.#pending.get(sessionId) === pending) this.#pending.delete(sessionId)
       return true
     }
 
-    const active = this.#active.get(view.sessionId)
+    if (this.#activeRun.get(sessionId) !== runId) return false
+    const active = this.#active.get(sessionId)
     const controller = this.#controllers.get(runId)
     if (!active || !controller) return false
-    controller.abort('user requested stop')
+    if (!controller.signal.aborted) controller.abort(reason)
     await active.catch(() => {})
     return true
   }
 
+  async cancelSession(sessionId: string, reason = 'Plan Orchestrator disabled'): Promise<boolean> {
+    const runId = this.activeRun(sessionId)
+    return runId ? this.cancel(runId, reason) : false
+  }
+
+  async cancelAll(reason = 'Plan Orchestrator disabled'): Promise<void> {
+    const sessionIds = new Set([...this.#pending.keys(), ...this.#activeRun.keys()])
+    await Promise.allSettled([...sessionIds].map(sessionId => this.cancelSession(sessionId, reason)))
+  }
+
   async onParentIdle(sessionId: string): Promise<boolean> {
     const pending = this.#pending.get(sessionId)
-    if (!pending || this.#active.has(sessionId)) return false
-    this.#pending.delete(sessionId)
+    if (!pending || pending.cancelled || this.#active.has(sessionId)) return false
     try { await pending.persisted }
     catch (error) {
+      if (this.#pending.get(sessionId) === pending) this.#pending.delete(sessionId)
       this.failView(pending.runId, 'FAILED', `approval persistence failed: ${(error as Error).message}`)
       return false
     }
-    return this.start(pending.launch, pending.runId)
+    if (pending.cancelled || this.#pending.get(sessionId) !== pending) return false
+
+    const started = await this.start(pending.launch, pending.runId)
+    if (pending.cancelled) {
+      // cancel() owns abort/terminal persistence. Do not emit a second terminal
+      // event if disable raced with the synchronous launch transition.
+      if (this.#pending.get(sessionId) === pending) this.#pending.delete(sessionId)
+      return false
+    }
+    if (this.#pending.get(sessionId) === pending) this.#pending.delete(sessionId)
+    return started
   }
 
   async reconcileSession(agent: any): Promise<RunView[]> {
@@ -268,16 +295,19 @@ export class OrchestrationService {
     if (this.#active.has(launch.sessionId)) return false
     const controller = new AbortController()
     this.#controllers.set(runId, controller)
+    this.#activeRun.set(launch.sessionId, runId)
     let task: Promise<void>
     try {
       task = launch.agent.runMaintenance(async (signal: AbortSignal) => this.run(launch, runId, AbortSignal.any([signal, controller.signal])))
     } catch (error) {
       this.#controllers.delete(runId)
+      if (this.#activeRun.get(launch.sessionId) === runId) this.#activeRun.delete(launch.sessionId)
       throw error
     }
     task = task.finally(() => {
       this.#active.delete(launch.sessionId)
       this.#controllers.delete(runId)
+      if (this.#activeRun.get(launch.sessionId) === runId) this.#activeRun.delete(launch.sessionId)
     })
     this.#active.set(launch.sessionId, task)
     void task.catch(() => {})
@@ -345,6 +375,22 @@ export class OrchestrationService {
     }
     await this.store.writeManifest(manifest)
     await atomicJson(join(dir, 'plan.json'), launch.artifact)
+  }
+
+  private async markCancelled(view: RunView, reason: string, persistError?: unknown): Promise<void> {
+    view.phase = 'CANCELLED'
+    view.status = 'CANCELLED'
+    view.message = persistError ? `${reason}; approval persistence failed: ${(persistError as Error).message}` : reason
+    view.updatedAt = new Date().toISOString()
+    this.append(this.#agents.get(view.sessionId)?.session, 'planx/run-terminal', {
+      runId: view.runId, phase: 'CANCELLED', message: view.message, at: view.updatedAt,
+    })
+    const manifest = await this.store.readManifest(view.sessionId, view.runId).catch(() => undefined)
+    if (manifest) {
+      manifest.phase = 'CANCELLED'
+      manifest.terminal = true
+      await this.store.writeManifest(manifest)
+    }
   }
 
   private append(session: any, type: string, data: any): void {
