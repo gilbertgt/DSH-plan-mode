@@ -1,6 +1,6 @@
 import type { PlanSettings } from '../contract/settings.ts'
 
-const BASE = `# Plan Orchestrator Contract
+export const PLANNER_POLICY = `# Plan Orchestrator Contract
 You are the Planner. Plan mode is research-and-design only; do not mutate repository files.
 
 ## Evidence before plan
@@ -44,6 +44,6 @@ export const COMPACT_PLANNER_REMINDER = 'Plan Mode remains active: evidence-befo
 export function plannerPolicyText(enabled: boolean, active: boolean, first: boolean, planning?: PlanSettings['planning']): string {
   if (!enabled || !active) return ''
   if (!first) return COMPACT_PLANNER_REMINDER
-  if (!planning) return BASE
-  return `${BASE}\n\n${researchPolicy(planning)}`
+  if (!planning) return PLANNER_POLICY
+  return `${PLANNER_POLICY}\n\n${researchPolicy(planning)}`
 }
