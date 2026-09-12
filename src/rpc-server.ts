@@ -41,7 +41,10 @@ export function registerRpc(connection: any, deps: any) {
             case 'run-list': data = deps.runList?.({ sessionId: typeof input.sessionId === 'string' ? boundedId(input.sessionId, 'sessionId') : undefined }) ?? []; break
             case 'run-detail': data = await deps.runDetail?.({ runId: boundedId(input.runId, 'runId') }); break
             case 'run-cancel': data = await deps.runCancel?.({ runId: boundedId(input.runId, 'runId') }); break
-            case 'run-resume': data = await deps.runResume?.({ runId: boundedId(input.runId, 'runId') }); break
+            case 'run-resume':
+              if (deps.isEnabled && !deps.isEnabled()) throw new Error('Plan Orchestrator is disabled in Settings → Plan Mode.')
+              data = await deps.runResume?.({ runId: boundedId(input.runId, 'runId') })
+              break
             case 'run-cleanup': data = await deps.runCleanup?.({ runId: boundedId(input.runId, 'runId') }); break
             case 'diagnostics': data = await deps.diagnostics?.(input); break
             case 'external-preflight': data = await deps.externalPreflight?.(input); break

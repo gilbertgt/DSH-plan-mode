@@ -32,6 +32,7 @@ export function installIssueCommand(ctx:any,deps:{settings:(cwd?:string)=>any;or
         if(!issueNumber)return{kind:'error',text:'Usage: /plan-issue <positive issue number>'}
         const cwd=agent.session.header?.cwd??process.cwd()
         const settings=deps.settings(cwd)
+        if(!settings.enabled)return{kind:'error',text:'Plan Orchestrator is disabled in Settings → Plan Mode.'}
         if(!settings.externalIssue.enabled)return{kind:'error',text:'External Issue Mode is disabled in Settings → Plan Mode.'}
         const issue=await fetchIssue(cwd,issueNumber)
         const texts=[String(issue?.body??''),...(issue?.comments??[]).map((c:any)=>String(c?.body??''))]

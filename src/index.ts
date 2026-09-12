@@ -153,6 +153,7 @@ export function apply(ctx: Context) {
       if (disposed) return
       disposeTransport = registerRpc(scope.connection, {
         ctx: scope,
+        isEnabled: () => settings.get().enabled,
         runList: ({ sessionId }: any) => orchestration.list(sessionId),
         runDetail: ({ runId }: any) => orchestration.detail(runId),
         runCancel: ({ runId }: any) => orchestration.cancel(runId),
