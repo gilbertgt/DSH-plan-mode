@@ -1,38 +1,31 @@
-import { execFile, spawn } from 'node:child_process'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
+import { parseValidationCommand } from '../contract/plan-artifact.ts'
 import { snapshotDirty, snapshotHash } from '../git/fingerprints.ts'
 import { fullHead } from '../git/repository.ts'
 import { hashBytes, type ValidationReceipt } from './receipts.ts'
 
-const execFileP = promisify(execFile)
+let configuredShell: any
+
+/** Bind validation to the current DSH shell seam. There is deliberately no
+ * child_process fallback: missing sandboxed shell execution is release-blocking. */
+export function configureValidationShell(shell: any): () => void {
+  const previous = configuredShell
+  configuredShell = shell
+  return () => { if (configuredShell === shell) configuredShell = previous }
+}
 
 function safe(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 160)
 }
 
-async function terminateTree(child: ReturnType<typeof spawn>): Promise<void> {
-  if (!child.pid) return
-  if (process.platform === 'win32') {
-    await execFileP('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }).catch(() => {})
-    return
-  }
-  try {
-    process.kill(-child.pid, 'SIGTERM')
-  } catch {
-    try {
-      child.kill('SIGTERM')
-    } catch {}
-  }
-  await new Promise(resolve => setTimeout(resolve, 1_000))
-  if (child.exitCode !== null) return
-  try {
-    process.kill(-child.pid, 'SIGKILL')
-  } catch {
-    try {
-      child.kill('SIGKILL')
-    } catch {}
+async function assertExistingPackageScript(cwd: string, command: string): Promise<void> {
+  const parsed = parseValidationCommand(command)
+  let pkg: any
+  try { pkg = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) }
+  catch (error) { throw new Error(`validation requires readable package.json: ${(error as Error).message}`) }
+  if (!pkg?.scripts || typeof pkg.scripts[parsed.script] !== 'string' || !pkg.scripts[parsed.script].trim()) {
+    throw new Error(`validation package script does not exist: ${parsed.script}`)
   }
 }
 
@@ -46,70 +39,42 @@ export interface RunValidationOptions {
   timeoutMs: number
   capBytes: number
   ownershipFingerprint?: string
+  shell?: any
+  sessionId?: string
 }
 
 export async function runValidation(opts: RunValidationOptions): Promise<ValidationReceipt> {
+  const shell = opts.shell ?? configuredShell
+  if (!shell?.resolve || !shell?.run) throw new Error('sandboxed DSH shell executor unavailable for host validation')
+  await assertExistingPackageScript(opts.cwd, opts.command)
+
   const before = await snapshotDirty(opts.cwd)
   const head = await fullHead(opts.cwd)
   const start = new Date().toISOString()
-  const stdoutChunks: Buffer[] = []
-  const stderrChunks: Buffer[] = []
-  let stdoutBytes = 0
-  let stderrBytes = 0
-  let stdoutTruncated = false
-  let stderrTruncated = false
-  let timedOut = false
-
-  const child = spawn(opts.command, {
-    cwd: opts.cwd,
-    shell: true,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32',
-  })
-
-  const collect = (chunks: Buffer[], kind: 'stdout' | 'stderr') => (data: Buffer): void => {
-    const used = kind === 'stdout' ? stdoutBytes : stderrBytes
-    if (used >= opts.capBytes) {
-      if (kind === 'stdout') stdoutTruncated = true
-      else stderrTruncated = true
-      return
-    }
-    const take = data.subarray(0, Math.max(0, opts.capBytes - used))
-    chunks.push(take)
-    if (take.length < data.length) {
-      if (kind === 'stdout') stdoutTruncated = true
-      else stderrTruncated = true
-    }
-    if (kind === 'stdout') stdoutBytes += take.length
-    else stderrBytes += take.length
+  const sandboxPolicy = {
+    mode: 'workspace-write' as const,
+    workspaceRoot: opts.cwd,
+    ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
   }
-
-  child.stdout.on('data', collect(stdoutChunks, 'stdout'))
-  child.stderr.on('data', collect(stderrChunks, 'stderr'))
-
-  let timer: NodeJS.Timeout | undefined
-  const timeout = new Promise<number | null>(resolve => {
-    timer = setTimeout(() => {
-      timedOut = true
-      void terminateTree(child).finally(() => resolve(null))
-    }, opts.timeoutMs)
+  const spec = shell.resolve({
+    command: opts.command,
+    workdir: opts.cwd,
+    timeoutMs: opts.timeoutMs,
+    stdoutMaxBytes: opts.capBytes,
+    sandboxPolicy,
   })
-  const exited = new Promise<number | null>((resolve, reject) => {
-    child.once('error', reject)
-    child.once('exit', code => resolve(code))
-  })
+  const result = await shell.run(spec)
+  const stdout = Buffer.from(String(result?.stdout?.text ?? ''), 'utf8')
+  const stderr = Buffer.from(String(result?.stderr?.text ?? ''), 'utf8')
+  const stdoutTruncated = Boolean(result?.stdout?.truncated)
+  const stderrTruncated = Boolean(result?.stderr?.truncated)
+  const timedOut = Boolean(result?.timedOut)
+  const aborted = Boolean(result?.aborted)
+  const exitCode = typeof result?.exitCode === 'number' ? result.exitCode : null
+  const sandbox = result?.sandbox
+  const sandboxIncomplete = !sandbox || sandbox.runnerFailed === true || sandbox.enforcement !== 'full'
+  const sandboxDenied = Boolean(sandbox?.denied)
 
-  const observedExitCode = await Promise.race([exited, timeout]).finally(() => {
-    if (timer) clearTimeout(timer)
-  })
-  if (timedOut) await exited.catch(() => null)
-  // Process-tree termination reports platform-specific shell exit codes (for example 1 on Windows).
-  // A timed-out validation has no trustworthy command exit code, so normalize it for deterministic receipts.
-  const exitCode = timedOut ? null : observedExitCode
-
-  const stdout = Buffer.concat(stdoutChunks)
-  const stderr = Buffer.concat(stderrChunks)
   const validationDir = join(opts.runDir, 'validation')
   await mkdir(validationDir, { recursive: true })
   const prefix = `${safe(opts.phase)}-${safe(opts.runId)}-${safe(opts.commandId)}`
@@ -122,10 +87,10 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
 
   const after = await snapshotDirty(opts.cwd)
   const mutated = snapshotHash(before) !== snapshotHash(after)
-  const status = stdoutTruncated || stderrTruncated || timedOut
-    ? 'INCONCLUSIVE'
-    : mutated
-      ? 'UNSAFE_MUTATION'
+  const status = sandboxDenied || mutated
+    ? 'UNSAFE_MUTATION'
+    : sandboxIncomplete || stdoutTruncated || stderrTruncated || timedOut || aborted
+      ? 'INCONCLUSIVE'
       : exitCode === 0
         ? 'PASS'
         : 'FAIL'
@@ -139,7 +104,7 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
     start,
     end: new Date().toISOString(),
     timeoutMs: opts.timeoutMs,
-    exitCode,
+    exitCode: timedOut || aborted ? null : exitCode,
     status,
     stdout: {
       path: stdoutPath,
@@ -155,6 +120,6 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
     },
     boundHead: head,
     ownershipFingerprint: opts.ownershipFingerprint ?? snapshotHash(after),
-    complete: !timedOut && !stdoutTruncated && !stderrTruncated,
+    complete: !sandboxIncomplete && !sandboxDenied && !timedOut && !aborted && !stdoutTruncated && !stderrTruncated,
   }
 }
