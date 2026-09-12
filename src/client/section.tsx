@@ -28,7 +28,7 @@ export function PlanModeSection({ rpc, t, settingsScope }: any) {
   else if(tab==='planning')content=<Planning settings={settings} patch={(p:any)=>mutate('planning',p)}/>
   else if(tab==='execution')content=<Execution settings={settings} patch={(p:any)=>mutate('execution',p)}/>
   else if(tab==='review')content=<Review settings={settings} patch={(p:any)=>mutate('review',p)}/>
-  else if(tab==='recovery')content=<Recovery rpc={rpc}/>
+  else if(tab==='recovery')content=<Recovery rpc={rpc} allowSafeResume={settings.recovery.allowSafeResume}/>
   else if(tab==='external')content=<ExternalIssue settings={settings} patch={(p:any)=>mutate('externalIssue',p)}/>
   else content=<Diagnostics diagnostics={diag}/>
   return <section className="planx"><div className="planx-row planx-between"><h2>Plan Mode</h2><div className="planx-row"><label><span><input type="checkbox" checked={settings.enabled} onChange={e=>{setSettings((s:any)=>({...s,enabled:e.target.checked}));setDirty(true)}}/> Enabled</span></label>{dirty&&<button onClick={save}>{t?.('save')??'Save'}</button>}</div></div>{error&&<div role="alert" className="planx-error">{error}</div>}<div className="planx-tabs" role="tablist" aria-label="Plan Mode settings">{tabs.map(([id,label],index)=><button ref={el=>{tabRefs.current[index]=el}} role="tab" aria-selected={tab===id} tabIndex={tab===id?0:-1} key={id} onKeyDown={e=>key(e,index)} onClick={()=>setTab(id)}>{t?.(id)??label}</button>)}</div>{content}</section>
