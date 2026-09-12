@@ -86,12 +86,25 @@ async function stopTree(child) {
   }
 }
 
+const suppliedTarball = process.env.PLANX_TARBALL ? resolve(root, process.env.PLANX_TARBALL) : undefined
 let tarball
+let ownsTarball = false
 try {
-  const packed = JSON.parse(npmCommand(['pack', '--json', '--ignore-scripts']))[0]
-  if (!packed?.filename) throw new Error('npm pack produced no tarball')
-  tarball = resolve(root, packed.filename)
-  const packedPaths = new Set((packed.files ?? []).map(entry => entry.path))
+  let packedPaths
+  if (suppliedTarball) {
+    if (!existsSync(suppliedTarball)) throw new Error(`supplied release tarball missing: ${suppliedTarball}`)
+    tarball = suppliedTarball
+    const entries = command('tar', ['-tf', tarball]).split(/\r?\n/).filter(Boolean)
+    packedPaths = new Set(entries
+      .filter(entry => entry.startsWith('package/') && !entry.endsWith('/'))
+      .map(entry => entry.slice('package/'.length)))
+  } else {
+    const packed = JSON.parse(npmCommand(['pack', '--json', '--ignore-scripts']))[0]
+    if (!packed?.filename) throw new Error('npm pack produced no tarball')
+    tarball = resolve(root, packed.filename)
+    ownsTarball = true
+    packedPaths = new Set((packed.files ?? []).map(entry => entry.path))
+  }
   for (const required of ['lib/index.js', 'lib/client.js', 'cordis.patch.yml', 'compatibility.json']) {
     if (!packedPaths.has(required)) throw new Error(`tarball missing ${required}`)
   }
@@ -136,8 +149,8 @@ try {
   dsh(['plugin', '--profile', profile, 'remove', '@gilbertgt/dsh-plan-orchestrator', '--ignore-scripts'])
   const afterRemove = dsh(['--profile', profile, '--dump-config'])
   if (afterRemove.includes("name: '@gilbertgt/dsh-plan-orchestrator'")) throw new Error('plugin still present after uninstall')
-  console.log('rc.1 tarball install / profile / web boot / uninstall smoke OK')
+  console.log(`rc.1 tarball install / profile / web boot / uninstall smoke OK${suppliedTarball ? ' (verified release artifact)' : ''}`)
 } finally {
-  if (tarball && existsSync(tarball)) { try { unlinkSync(tarball) } catch {} }
+  if (ownsTarball && tarball && existsSync(tarball)) { try { unlinkSync(tarball) } catch {} }
   rmSync(home, { recursive: true, force: true })
 }
