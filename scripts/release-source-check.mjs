@@ -33,10 +33,9 @@ if (strict) {
   if (process.env.GITHUB_SHA && process.env.GITHUB_SHA !== head) {
     throw new Error(`release blocked: checkout HEAD ${head} != GITHUB_SHA ${process.env.GITHUB_SHA}`)
   }
-  try {
-    git(['merge-base', '--is-ancestor', head, 'origin/main'])
-  } catch {
-    throw new Error(`release blocked: tag commit ${head} is not reachable from origin/main`)
+  const main = git(['rev-parse', 'origin/main'])
+  if (head !== main) {
+    throw new Error(`release blocked: tag commit ${head} is not the current origin/main tip ${main}`)
   }
 }
 
