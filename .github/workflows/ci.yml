@@ -23,10 +23,29 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '22.19.0' }
-      # package-lock.json is a release prerequisite added by the secure release
-      # plan. Until it is committed, PR CI retains npm install. Once present,
-      # this lane should move to npm ci --ignore-scripts.
-      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Detect committed lockfile
+        id: lockfile
+        shell: bash
+        run: |
+          if git ls-files --error-unmatch package-lock.json >/dev/null 2>&1; then
+            echo 'committed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'committed=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install locked dependencies
+        if: ${{ hashFiles('package-lock.json') != '' }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Bootstrap dependencies before first lockfile commit
+        if: ${{ hashFiles('package-lock.json') == '' }}
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Preserve generated lockfile for one-time bootstrap
+        if: ${{ steps.lockfile.outputs.committed != 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: generated-package-lock
+          path: package-lock.json
+          if-no-files-found: error
+          retention-days: 1
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
@@ -46,7 +65,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '22.19.0' }
-      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Install locked dependencies
+        if: ${{ hashFiles('package-lock.json') != '' }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Bootstrap dependencies before first lockfile commit
+        if: ${{ hashFiles('package-lock.json') == '' }}
+        run: npm install --ignore-scripts --no-audit --no-fund
       - run: npm run test:platform
       # Build is required by the Windows E2E path. Typecheck and package-policy
       # verification are intentionally not duplicated from the Ubuntu lane.
@@ -79,7 +103,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '22.19.0' }
-      - run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Install locked dependencies
+        if: ${{ hashFiles('package-lock.json') != '' }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Bootstrap dependencies before first lockfile commit
+        if: ${{ hashFiles('package-lock.json') == '' }}
+        run: npm install --ignore-scripts --no-audit --no-fund
       - name: Overlay rc.2 API packages
         run: >-
           npm install --force --ignore-scripts --no-save
