@@ -240,3 +240,76 @@ Before merging this implementation PR:
 4. confirm PR CI is not materially more expensive than the existing workflow and redundant checks were removed where safe;
 5. require existing CI to pass;
 6. merge only if review has no unresolved blocker/high-severity finding.
+
+---
+
+# Pre-1.0 Security & Correctness Gate
+
+Issue: #5
+
+## Decision lock
+
+No `v1.0.0` tag and no npm publication until this section's P0 and P1 gates pass review and CI. The package/release firewall remains fail-closed; runtime security cannot be delegated to prompts or post-hoc detection.
+
+## Runtime security changes
+
+1. **Validation execution**
+   - Remove plugin-host `child_process.spawn(..., { shell: true })` execution for PlanArtifact validation.
+   - Accept only a conservative host-validated package-script command grammar (`npm|pnpm|yarn|bun test` or `run <existing-script>`; no shell operators, inline code flags, redirections, command substitution, arbitrary binaries, or package-download execution).
+   - Execute accepted commands through DSH `ctx.shell.resolve()` + `ctx.shell.run()` with an explicit `workspace-write` sandbox policy rooted at the isolated validation worktree.
+   - Require sandbox evidence and fail closed if sandbox execution is unavailable, degraded, denied, timed out, aborted, or output is truncated.
+
+2. **Exact mutation ownership**
+   - Native Worker/Integrator/Fixer children receive an explicit tool allowlist: read/search/LSP plus only file mutation tools understood by the ownership guard.
+   - Shell/pwsh/run-code and unknown mutation surfaces are not exposed to native mutating roles.
+   - Isolated SDK workers remain worktree-confined and retain post-run exact ownership verification before any patch reaches the user tree.
+
+3. **Enabled lifecycle**
+   - `Enabled = OFF` cancels pending and active runs, not only native hooks.
+   - Pending cancellation waits for approval persistence and then writes a terminal CANCELLED manifest, eliminating persistence resurrection.
+   - Parent-idle launch keeps a cancellable pending record until persistence/start transition is committed; disabling during the transition cannot start an untracked run.
+   - Turning OFF never causes a cancelled run to revive when ON is restored.
+
+4. **External Issue trust**
+   - Issue/comment JSON is only control-plane input when its author has `write`, `maintain`, or `admin` permission on the actual local GitHub repository.
+   - Claimed repository metadata must match the local repository before selection.
+   - Untrusted comments cannot win by publishing a larger revision and cannot forge completion evidence.
+
+## Correctness changes
+
+5. `recovery.allowSafeResume` is enforced server-side and reflected in UI.
+6. Planner settings are rendered into the actual Planner policy: adaptive/fixed research mode, initial read budget, soft token budget, progressive discovery, and expansion-reason rule.
+7. `execution.roleTimeoutMs` becomes a real AbortSignal deadline for Worker, Integrator, Reviewer and targeted-fix roles.
+8. All run-owned worktrees use `worktrees/<runId>/<safe-lease-id>` so terminal cleanup removes retained worker and validation evidence correctly.
+9. `@deepseek-ai/schemastery` is declared as a runtime dependency instead of relying on transitive host composition.
+
+## Release changes
+
+10. Release verification creates the exact `.tgz` before rc.1 E2E; tag E2E installs/tests that exact artifact instead of repacking a clean checkout with missing `lib/`.
+11. OIDC permission is moved to a separate staging job; the verify/build/test job remains `contents: read` only.
+12. Strict release source requires the tag commit to equal `origin/main` HEAD, not merely be an ancestor.
+13. Existing digest verification and staged-only publication remain mandatory.
+
+## Repository protection
+
+The GitHub connector used for implementation has read-only ruleset/branch-protection administration. The code PR therefore cannot truthfully claim to enable repository rules. Before the first npm tag, the maintainer must configure `main` to require PR + required CI and block force-push/deletion. This is a release gate, not an optional recommendation.
+
+## Adversarial regression tests
+
+Tests must prove:
+
+- malicious validation shell syntax and arbitrary executables are rejected before execution;
+- accepted package scripts execute only through sandboxed `ctx.shell` and sandbox failure is blocking;
+- native mutating roles cannot see shell/run-code tools;
+- OFF during pending persistence cannot resurrect/start a run;
+- OFF aborts an already-active run and persists CANCELLED;
+- untrusted GitHub commenters cannot supply plan or completion contracts;
+- safe resume is denied when disabled;
+- role timeout signals abort long-running roles;
+- retained worktrees are removed by run cleanup;
+- release E2E consumes the exact verified tarball;
+- tag source fails unless it is exactly current `origin/main`.
+
+## Merge gate
+
+One PR, one final head. Avoid CI-only churn. Merge only after the latest head has all required CI green and an independent review finds no unresolved P0/P1 release blocker. Closing #5 means code gates are complete; repository branch protection remains a separately verified pre-tag setting because this connector cannot mutate rulesets.
