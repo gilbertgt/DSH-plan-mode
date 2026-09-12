@@ -36,12 +36,24 @@ interface WorkerOutcome { task: PlanTask; result: MutationResult; changed: strin
 interface WorktreeRecord { taskId: string; path: string; baseHead: string; status: 'ACTIVE'|'CAPTURED'|'FAILED'|'CLEANED'; fingerprint?: string; patchSha256?: string }
 
 const unionOwnership = (plan: PlanArtifact): string[] => [...new Set(plan.tasks.flatMap(task => task.modify))].sort()
-const currentRoute = (agent: any): RouteChoice => ({
-  provider: agent.options?.provider,
-  model: agent.options?.model,
-  reasoningEffort: agent.options?.reasoningEffort,
-  maxTokens: agent.options?.maxTokens,
-}) as RouteChoice
+/**
+ * Absent optional route fields must not exist at all. An explicit
+ * `reasoningEffort: undefined` is rejected by every DSH lossless-JSON boundary
+ * (subagent descriptors, the session log, SDK child options), so the property is
+ * constructed only when the live agent actually carries a value.
+ */
+export const currentRoute = (agent: any): RouteChoice => {
+  const provider = agent?.options?.provider
+  const model = agent?.options?.model
+  const reasoningEffort = agent?.options?.reasoningEffort
+  const maxTokens = agent?.options?.maxTokens
+  return {
+    provider,
+    model,
+    ...(reasoningEffort !== undefined ? { reasoningEffort: String(reasoningEffort) } : {}),
+    ...(maxTokens !== undefined ? { maxTokens: Number(maxTokens) } : {}),
+  } as RouteChoice
+}
 
 async function resolvedChoices(ctx: any, settings: PlanSettings, role: keyof PlanSettings['roles'], agent: any): Promise<RouteChoice[]> {
   const candidates = routeChoices(settings.roles[role], currentRoute(agent))

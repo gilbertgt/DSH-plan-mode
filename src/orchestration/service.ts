@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { PlanArtifact } from '../contract/plan-artifact.ts'
-import { reducePlanxEvents, type RunPhase, type RunProjection } from '../contract/events.ts'
+import { reducePlanxEvents, assertLosslessEventData, type RunPhase, type RunProjection } from '../contract/events.ts'
 import { RunStore, atomicJson, readJson, type RunManifest } from '../recovery/store.ts'
 import { diagnoseResume, interruptManifest, type RecoveryCheckpoint } from '../recovery/reconcile.ts'
 import { repoRoot } from '../git/repository.ts'
@@ -36,6 +36,25 @@ export interface RunView extends RunProjection {
 interface Pending { runId: string; launch: OrchestratorLaunch; persisted: Promise<void>; cancelled: boolean }
 
 type OrchestratorRunner = (launch: OrchestratorLaunch, runId: string, signal: AbortSignal) => Promise<void>
+
+const TERMINAL_PHASES = new Set<string>(['COMPLETE', 'BLOCKED', 'FAILED', 'INTERRUPTED', 'CANCELLED'])
+/** Runner errors matching this shape are safety boundaries, not plain faults. */
+const BLOCKING_FAILURE = /(drift|ownership|blocked|inconclusive|unsafe|conflict|escape|checkpoint|tampered|stale)/i
+
+function failureMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message
+  if (typeof error === 'string' && error) return error
+  try {
+    const encoded = JSON.stringify(error)
+    if (encoded && encoded !== '{}' && encoded !== 'null') return encoded
+  } catch { /* fall through to the generic label */ }
+  return 'unknown orchestration failure'
+}
+
+function terminalPhaseFor(aborted: boolean, message: string): 'CANCELLED'|'BLOCKED'|'FAILED' {
+  if (aborted) return 'CANCELLED'
+  return BLOCKING_FAILURE.test(message) ? 'BLOCKED' : 'FAILED'
+}
 
 export class OrchestrationService {
   readonly store: RunStore
@@ -124,7 +143,15 @@ export class OrchestrationService {
       view.status = view.phase
       view.reviewRound = Number(data.reviewRound ?? view.reviewRound)
       if (data.message) view.message = String(data.message)
-      this.append(session, 'planx/run-phase', { runId, phase: view.phase, message: data.message, reviewRound: view.reviewRound, at: now })
+      this.append(session, 'planx/run-phase', {
+        runId,
+        phase: view.phase,
+        // Absent, never `undefined`: Session.append rejects an explicitly
+        // undefined property, and a phase event with no message is normal.
+        ...(data.message !== undefined ? { message: String(data.message) } : {}),
+        reviewRound: view.reviewRound,
+        at: now,
+      })
     } else if (kind === 'task-start') {
       if (!view.activeTaskIds.includes(data.taskId)) view.activeTaskIds.push(data.taskId)
       this.append(session, 'planx/task-start', { runId, taskId: String(data.taskId), at: now })
@@ -277,7 +304,13 @@ export class OrchestrationService {
       message: `Safe resume from ${diagnosis.resumeFrom}`,
       at: now,
     })
-    await this.start(launch, runId)
+    try {
+      await this.start(launch, runId)
+    } catch (error) {
+      // A resume that cannot start must not stay INTERRUPTED + non-terminal.
+      await this.finalize(launch, runId, terminalPhaseFor(false, failureMessage(error)), failureMessage(error))
+      return { ok: false, reason: failureMessage(error) }
+    }
     return { ok: true, resumeFrom: diagnosis.resumeFrom }
   }
 
@@ -315,39 +348,69 @@ export class OrchestrationService {
   }
 
   private async run(launch: OrchestratorLaunch, runId: string, signal: AbortSignal): Promise<void> {
-    const initial = await this.store.readManifest(launch.sessionId, runId)
-    initial.phase = launch.resumeFrom ?? 'PREFLIGHT'
-    initial.terminal = false
-    await this.store.writeManifest(initial)
-    this.recordEvent('phase', { runId, phase: initial.phase })
-
     let terminalPhase: 'COMPLETE'|'BLOCKED'|'FAILED'|'CANCELLED' = 'COMPLETE'
     let terminalMessage: string | undefined
     let thrown: unknown
+    let failed = false
     try {
-      await this.runner(launch, runId, signal)
-    } catch (error) {
-      thrown = error
-      terminalMessage = (error as Error).message
-      terminalPhase = signal.aborted
-        ? 'CANCELLED'
-        : /(drift|ownership|blocked|inconclusive|unsafe|conflict|escape|checkpoint|tampered|stale)/i.test(terminalMessage)
-          ? 'BLOCKED'
-          : 'FAILED'
+      try {
+        const initial = await this.store.readManifest(launch.sessionId, runId)
+        initial.phase = launch.resumeFrom ?? 'PREFLIGHT'
+        initial.terminal = false
+        await this.store.writeManifest(initial)
+        this.recordEvent('phase', { runId, phase: initial.phase })
+      } catch (error) {
+        // PREFLIGHT startup must fail closed: an exception in the initial phase
+        // event or manifest write must not leave a permanently non-terminal run.
+        thrown = error
+        failed = true
+        terminalMessage = failureMessage(error)
+        terminalPhase = terminalPhaseFor(signal.aborted, terminalMessage)
+      }
+      if (!failed) {
+        try {
+          await this.runner(launch, runId, signal)
+        } catch (error) {
+          thrown = error
+          failed = true
+          terminalMessage = failureMessage(error)
+          terminalPhase = terminalPhaseFor(signal.aborted, terminalMessage)
+        }
+      }
+    } finally {
+      await this.finalize(launch, runId, terminalPhase, terminalMessage)
     }
+    if (failed) throw thrown
+  }
 
-    const latest = await this.store.readManifest(launch.sessionId, runId)
-    latest.phase = terminalPhase
-    latest.terminal = true
-    await this.store.writeManifest(latest)
-    this.recordEvent('phase', { runId, phase: terminalPhase, message: terminalMessage })
-    this.append(launch.agent.session, 'planx/run-terminal', {
-      runId,
-      phase: terminalPhase,
-      ...(terminalMessage ? { message: terminalMessage } : {}),
-      at: new Date().toISOString(),
-    })
-    if (thrown !== undefined) throw thrown
+  /**
+   * Persist the terminal state. Never throws: a session whose append is
+   * unavailable must still not be left with a non-terminal manifest.
+   */
+  private async finalize(launch: OrchestratorLaunch, runId: string, phase: string, message?: string): Promise<void> {
+    if (!TERMINAL_PHASES.has(phase)) throw new Error(`plan-orchestrator refusing non-terminal finalize phase: ${phase}`)
+    const at = new Date().toISOString()
+    try {
+      const latest = await this.store.readManifest(launch.sessionId, runId)
+      latest.phase = phase
+      latest.terminal = true
+      await this.store.writeManifest(latest)
+    } catch (error) {
+      const message2 = `terminal manifest persistence failed: ${failureMessage(error)}`
+      try { launch.agent?.session?.append?.('planx/finalize-error', { runId, phase, message: message2, at }) } catch { /* containment: the run view is the last resort */ }
+      this.failView(runId, 'FAILED', message2)
+    }
+    try {
+      this.recordEvent('phase', { runId, phase, ...(message !== undefined ? { message } : {}) })
+    } catch { /* the manifest already records the terminal phase */ }
+    try {
+      this.append(launch.agent.session, 'planx/run-terminal', {
+        runId,
+        phase,
+        ...(message ? { message } : {}),
+        at,
+      })
+    } catch { /* the manifest already records the terminal phase */ }
   }
 
   private async persistApproval(launch: OrchestratorLaunch, runId: string, now: string): Promise<void> {
@@ -395,6 +458,7 @@ export class OrchestrationService {
 
   private append(session: any, type: string, data: any): void {
     if (!session || typeof session.append !== 'function') throw new Error(`plan-orchestrator cannot persist ${type}: session append unavailable`)
+    assertLosslessEventData(data, type)
     session.append(type, data)
   }
 
