@@ -35,7 +35,11 @@ export interface RunView extends RunProjection {
 
 interface Pending { runId: string; launch: OrchestratorLaunch; persisted: Promise<void>; cancelled: boolean }
 
+type OrchestratorRunner = (launch: OrchestratorLaunch, runId: string, signal: AbortSignal) => Promise<void>
+
 export class OrchestrationService {
+  readonly store: RunStore
+  readonly runner: OrchestratorRunner
   #active = new Map<string, Promise<void>>()
   #activeRun = new Map<string, string>()
   #pending = new Map<string, Pending>()
@@ -43,10 +47,10 @@ export class OrchestrationService {
   #views = new Map<string, RunView>()
   #agents = new Map<string, any>()
 
-  constructor(
-    readonly store: RunStore,
-    readonly runner: (launch: OrchestratorLaunch, runId: string, signal: AbortSignal) => Promise<void>,
-  ) {}
+  constructor(store: RunStore, runner: OrchestratorRunner) {
+    this.store = store
+    this.runner = runner
+  }
 
   approve(launch: OrchestratorLaunch): string | false {
     if (this.#pending.has(launch.sessionId) || this.#active.has(launch.sessionId)) return false
@@ -191,7 +195,9 @@ export class OrchestrationService {
 
     const started = await this.start(pending.launch, pending.runId)
     if (pending.cancelled) {
-      await this.cancel(pending.runId, 'Plan Orchestrator disabled during launch transition')
+      // cancel() owns abort/terminal persistence. Do not emit a second terminal
+      // event if disable raced with the synchronous launch transition.
+      if (this.#pending.get(sessionId) === pending) this.#pending.delete(sessionId)
       return false
     }
     if (this.#pending.get(sessionId) === pending) this.#pending.delete(sessionId)
