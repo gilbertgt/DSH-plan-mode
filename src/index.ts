@@ -3,11 +3,12 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import { registerSettings } from './settings-service.ts'
-import { NativePlanBridge, installExitPlanValidator, isNativePlanApproved } from './planning/native-plan-bridge.ts'
+import { NativePlanBridge, consumeApprovedPlanResult, installExitPlanValidator } from './planning/native-plan-bridge.ts'
 import { plannerPolicyText } from './planning/policy.ts'
 import { PlannerReadOnlyGuard } from './planning/read-only-guard.ts'
 import { installPlannerRoute, validateFixedRoute } from './planning/planner-route.ts'
-import { OrchestrationService, installParentFence } from './orchestration/service.ts'
+import { OrchestrationService } from './orchestration/service.ts'
+import { installEnabledParentFence } from './orchestration/enabled-parent-fence.ts'
 import { createOrchestratorRunner } from './orchestration/engine.ts'
 import { planOrchestratorProjectionDefinition } from './orchestration/projection.ts'
 import { RunStore } from './recovery/store.ts'
@@ -57,6 +58,7 @@ export function apply(ctx: Context) {
     try { return Boolean(c.sessionProjections.stateOf(agent.session, 'plan')?.active) }
     catch { return false }
   }
+  const isEnabled = (agent: any): boolean => Boolean(agent && settings.effective(agent.session?.header?.cwd).enabled)
   const firstPolicySeen = new WeakSet<object>()
 
   c.systemPrompt.section({
@@ -65,25 +67,34 @@ export function apply(ctx: Context) {
     text: ({ agent }: any) => {
       if (!agent) return ''
       const effective = settings.effective(agent.session.header?.cwd)
-      const active = isPlanActive(agent)
       const session = agent.session as object
+      if (!effective.enabled) {
+        firstPolicySeen.delete(session)
+        return ''
+      }
+      const active = isPlanActive(agent)
       const first = !firstPolicySeen.has(session)
-      const text = plannerPolicyText(effective.enabled, active, first)
+      const text = plannerPolicyText(true, active, first)
       if (text && first) firstPolicySeen.add(session)
       return text
     },
   })
 
-  c.effect(() => installExitPlanValidator(c, bridge, () => settings.get().execution.requireExplicitOwnership), 'plan-orchestrator: validate native plan')
-  c.effect(() => readOnly.install(c), 'plan-orchestrator: strict read-only tool guard')
-  c.effect(() => installPlannerRoute(c, (agent: any) => settings.effective(agent.session.header?.cwd).roles.planner, isPlanActive), 'plan-orchestrator: planner route')
-  c.effect(() => installParentFence(c, orchestration), 'plan-orchestrator: parent fence')
+  c.effect(() => installExitPlanValidator(c, bridge, () => settings.get().execution.requireExplicitOwnership, isEnabled), 'plan-orchestrator: validate native plan')
+  c.effect(() => readOnly.install(c, isEnabled), 'plan-orchestrator: strict read-only tool guard')
+  c.effect(() => installPlannerRoute(c, (agent: any) => settings.effective(agent.session.header?.cwd).roles.planner, isPlanActive, isEnabled), 'plan-orchestrator: planner route')
+  c.effect(() => installEnabledParentFence(c, orchestration, isEnabled), 'plan-orchestrator: parent fence')
 
   // Wrap native plan-mode's pre-step handling: downstream first commits the
   // selected plan state, then we enforce/restore the file sandbox before the request.
   c.on('agent/pre-step', async ({ agent }: any, next: any) => {
     const decision = await next()
     const effective = settings.effective(agent.session.header?.cwd)
+    if (!effective.enabled) {
+      bridge.clearSession(String(agent.session.id))
+      readOnly.deactivate(agent.session, c.sandboxPolicy)
+      return decision
+    }
     if (decision.kind !== 'reject' && effective.planning.strictReadOnly && isPlanActive(agent)) {
       readOnly.activate(agent.session, c.sandboxPolicy)
     } else if (!isPlanActive(agent)) {
@@ -93,14 +104,9 @@ export function apply(ctx: Context) {
   }, { prepend: true })
 
   c.on('tools/result', (exec: any, result: any) => {
-    if (exec.name !== 'exit_plan_mode') return
+    const staged = consumeApprovedPlanResult(bridge, exec, result, isEnabled)
+    if (!staged) return
     const sessionId = String(exec.agent?.session?.id ?? '')
-    const callId = String(exec.callId ?? '')
-    // Every settled review consumes the staged candidate. Native rc.1 returns
-    // structured { approved: true } only for a real Approve; Keep planning,
-    // dismissal, cancellation, and tool failure must never launch execution.
-    const staged = bridge.consume(sessionId, callId)
-    if (!staged || !isNativePlanApproved(result)) return
     // Do NOT restore read-only here. Native plan-mode commits plan/mode=off at
     // the next pre-step; the parent fence lets that commit happen then rejects.
     orchestration.approve({
@@ -115,11 +121,15 @@ export function apply(ctx: Context) {
   c.on('session/event', (session: any, event: any) => {
     if (event.type === 'plan/mode') {
       firstPolicySeen.delete(session)
-      if (!event.data.active) readOnly.deactivate(session, c.sandboxPolicy)
+      if (!event.data.active) {
+        bridge.clearSession(String(session.id))
+        readOnly.deactivate(session, c.sandboxPolicy)
+      }
     }
   })
 
   c.on('agent/session-start', ({ agent }: any) => {
+    if (!isEnabled(agent)) return
     void orchestration.reconcileSession(agent).catch((error: any) => c.logger?.warn?.('plan-orchestrator recovery reconcile failed: %o', error))
   })
 
@@ -176,6 +186,7 @@ export function apply(ctx: Context) {
   // Validate already-persisted fixed routes eagerly when settings change, but
   // never mutate them silently if an adapter disappears.
   settings.watch(value => {
+    if (!value.enabled) return
     for (const role of Object.values(value.roles) as RoleRoute[]) {
       if (role.mode === 'fixed') void validateFixedRoute(c.llm, role).catch((error: any) => c.logger?.warn?.('plan-orchestrator fixed route unavailable: %s', error.message))
     }

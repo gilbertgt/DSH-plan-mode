@@ -44,12 +44,17 @@ function routeAt(route: RoleRoute, current: any, index: number): RouteChoice | u
   return route.fallbacks[index - 1]
 }
 
-export function installPlannerRoute(ctx: any, getRoute: (agent: any) => RoleRoute, isPlanActive: (agent: any) => boolean) {
+export function installPlannerRoute(
+  ctx: any,
+  getRoute: (agent: any) => RoleRoute,
+  isPlanActive: (agent: any) => boolean,
+  isEnabled: (agent: any) => boolean = () => true,
+) {
   const fallbackIndex = new WeakMap<object, number>()
 
   const request = ctx.on('agent/request', async ({ agent }: any, next: any) => {
     const current = await next()
-    if (!isPlanActive(agent)) {
+    if (!isEnabled(agent) || !isPlanActive(agent)) {
       fallbackIndex.delete(agent)
       return current
     }
@@ -69,7 +74,7 @@ export function installPlannerRoute(ctx: any, getRoute: (agent: any) => RoleRout
   const assembly = ctx.on('system-prompt/assemble', async (assembled: any, context: any, next: any) => {
     const result = await next()
     const agent = context?.agent
-    if (!agent || !isPlanActive(agent)) return result
+    if (!agent || !isEnabled(agent) || !isPlanActive(agent)) return result
     const route = getRoute(agent)
     const current = { ...agent.options }
     const selected = routeAt(route, current, fallbackIndex.get(agent) ?? 0)
@@ -88,7 +93,7 @@ export function installPlannerRoute(ctx: any, getRoute: (agent: any) => RoleRout
     const downstream = await next()
     if (downstream !== undefined) return downstream
     const { agent, failure, signal } = payload
-    if (signal?.aborted || !isPlanActive(agent) || !eligibleTransportFailure(failure)) return undefined
+    if (signal?.aborted || !isEnabled(agent) || !isPlanActive(agent) || !eligibleTransportFailure(failure)) return undefined
     const route = getRoute(agent)
     const currentIndex = fallbackIndex.get(agent) ?? 0
     const nextIndex = currentIndex + 1
@@ -99,7 +104,7 @@ export function installPlannerRoute(ctx: any, getRoute: (agent: any) => RoleRout
 
   const reset = ctx.on('agent/pre-step', async ({ agent }: any, next: any) => {
     const decision = await next()
-    if (!isPlanActive(agent)) fallbackIndex.delete(agent)
+    if (!isEnabled(agent) || !isPlanActive(agent)) fallbackIndex.delete(agent)
     return decision
   })
 
