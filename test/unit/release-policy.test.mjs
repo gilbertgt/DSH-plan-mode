@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import {
+  assertJsDependencyClosure,
   assertLockMetadata,
   assertPackageManifest,
   assertPackageMetadata,
@@ -30,7 +34,7 @@ const validPkg = {
   repository: { type: 'git', url: 'git+https://github.com/gilbertgt/DSH-plan-mode.git' },
 }
 
-test('package manifest is fail-closed', () => {
+test('package manifest is fail-closed outside the one-level JS build area', () => {
   assert.doesNotThrow(() => assertPackageManifest(validManifest))
   for (const forbidden of [
     'src/index.ts',
@@ -40,11 +44,31 @@ test('package manifest is fail-closed', () => {
     'private.key',
     'archive.tgz',
     'test/fixture.json',
-    'lib/unexpected.js',
+    'lib/nested/unexpected.js',
   ]) {
     assert.throws(() => assertPackageManifest([...validManifest, forbidden]), /unexpected package file/)
   }
   assert.throws(() => assertPackageManifest(validManifest.filter(path => path !== 'lib/index.js')), /missing lib\/index\.js/)
+})
+
+test('JS build graph allows reachable hashed chunks and rejects orphan chunks', () => {
+  const root = mkdtempSync(join(tmpdir(), 'release-policy-'))
+  try {
+    mkdirSync(join(root, 'lib'))
+    writeFileSync(join(root, 'lib', 'index.js'), 'export const main = 1; import("./chunk-a1b2.js")\n')
+    writeFileSync(join(root, 'lib', 'client.js'), 'module.exports = {}\n')
+    writeFileSync(join(root, 'lib', 'chunk-a1b2.js'), 'export const chunk = 1\n')
+    const reachable = [...validManifest, 'lib/chunk-a1b2.js']
+    assert.doesNotThrow(() => assertPackageManifest(reachable))
+    assert.doesNotThrow(() => assertJsDependencyClosure(root, reachable))
+
+    writeFileSync(join(root, 'lib', 'orphan-c3d4.js'), 'export const orphan = 1\n')
+    const withOrphan = [...reachable, 'lib/orphan-c3d4.js']
+    assert.doesNotThrow(() => assertPackageManifest(withOrphan))
+    assert.throws(() => assertJsDependencyClosure(root, withOrphan), /unreferenced build chunk/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('package metadata accepts future versions without hard-coding 1.0.0', () => {
