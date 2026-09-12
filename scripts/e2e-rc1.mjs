@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -16,19 +16,17 @@ const home = mkdtempSync(join(tmpdir(), 'planx-dsh-home-'))
 const profile = 'planx-e2e'
 const env = { ...process.env, DSH_HOME: home, NO_COLOR: '1', CI: '1' }
 
-// npm 10 on Windows can generate a local pnpm.cmd shim whose relative target
-// breaks once DSH changes cwd into a profile directory. Give DSH a test-local
-// launcher that resolves pnpm's declared bin entry absolutely instead. This
-// keeps the smoke test independent of any globally installed pnpm.
+// pnpm 12.3+ publishes `pnpm` as a placeholder that its lifecycle replaces
+// with a native executable. CI intentionally installs dependencies with
+// --ignore-scripts, so on Windows the generated pnpm.cmd would otherwise ask
+// Node to parse that placeholder/native target. pnpm also ships a stable JS
+// wrapper at bin/pnpm.mjs; expose that through a test-local cmd shim instead.
 if (process.platform === 'win32') {
-  const pnpmPackagePath = join(root, 'node_modules', 'pnpm', 'package.json')
-  const pnpmPackage = JSON.parse(readFileSync(pnpmPackagePath, 'utf8'))
-  const pnpmBin = typeof pnpmPackage.bin === 'string' ? pnpmPackage.bin : pnpmPackage.bin?.pnpm
-  if (typeof pnpmBin !== 'string' || !pnpmBin) throw new Error('pnpm package does not declare a pnpm bin entry')
-  const pnpmEntry = resolve(dirname(pnpmPackagePath), pnpmBin)
+  const pnpmWrapper = join(root, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
+  if (!existsSync(pnpmWrapper)) throw new Error(`pnpm JS wrapper missing: ${pnpmWrapper}`)
   const shimDir = join(home, 'test-bin')
   mkdirSync(shimDir, { recursive: true })
-  writeFileSync(join(shimDir, 'pnpm.cmd'), `@echo off\r\n"${process.execPath}" "${pnpmEntry}" %*\r\n`, 'utf8')
+  writeFileSync(join(shimDir, 'pnpm.cmd'), `@echo off\r\n"${process.execPath}" "${pnpmWrapper}" %*\r\n`, 'utf8')
   const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
   env[pathKey] = `${shimDir}${delimiter}${process.env[pathKey] ?? ''}`
 }
