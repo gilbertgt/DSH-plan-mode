@@ -65,7 +65,10 @@ test('scanner catches high-confidence credentials and private key material', () 
   assert.throws(() => scanSensitiveText(`value=ghp_${'A'.repeat(36)}`, 'bundle.js'), /GitHub token/)
   assert.throws(() => scanSensitiveText(`value=npm_${'B'.repeat(36)}`, 'bundle.js'), /npm token/)
   assert.throws(() => scanSensitiveText(`value=AKIA${'C'.repeat(16)}`, 'bundle.js'), /AWS access key/)
+  assert.throws(() => scanSensitiveText(`value=sk-proj-${'E'.repeat(32)}`, 'bundle.js'), /OpenAI-style API key/)
+  assert.throws(() => scanSensitiveText(`value=AIza${'F'.repeat(35)}`, 'bundle.js'), /Google API key/)
   assert.throws(() => scanSensitiveText(`Authorization: Bearer ${'D'.repeat(32)}`, 'bundle.js'), /Bearer credential/)
+  assert.throws(() => scanSensitiveText(`api_key='${'G'.repeat(32)}'`, 'bundle.js'), /credential assignment/)
 })
 
 test('scanner catches local user-home paths without rejecting harmless terminology', () => {
