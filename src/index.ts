@@ -15,10 +15,12 @@ import { RunStore } from './recovery/store.ts'
 import { installIssueCommand } from './external/issue-command.ts'
 import { ghPreflight } from './external/github.ts'
 import { repoRoot } from './git/repository.ts'
+import { configureValidationShell } from './validation/runner.ts'
+import { configureRoleTimeoutResolver } from './runtime-policy.ts'
 import type { RoleRoute } from './contract/settings.ts'
 
 export const name = 'plan-orchestrator'
-export const inject = ['settings', 'tools', 'llm', 'sessions', 'subagents', 'systemPrompt', 'sandboxPolicy', 'sessionProjections']
+export const inject = ['settings', 'tools', 'llm', 'sessions', 'subagents', 'systemPrompt', 'sandboxPolicy', 'sessionProjections', 'shell']
 
 const execFileP = promisify(execFile)
 const require = createRequire(import.meta.url)
@@ -61,6 +63,11 @@ export function apply(ctx: Context) {
   const isEnabled = (agent: any): boolean => Boolean(agent && settings.effective(agent.session?.header?.cwd).enabled)
   const firstPolicySeen = new WeakSet<object>()
 
+  // Runtime seams are bound explicitly and fail closed. Validation has no
+  // child_process fallback; mutating child roles receive the live timeout.
+  c.effect(() => configureValidationShell(c.shell), 'plan-orchestrator: sandbox validation runtime')
+  c.effect(() => configureRoleTimeoutResolver((cwd?: string) => settings.effective(cwd).execution.roleTimeoutMs), 'plan-orchestrator: role timeout runtime')
+
   c.systemPrompt.section({
     name: 'plan-orchestrator:policy',
     order: (c.systemPrompt.getSectionOrder?.('PLAN_POLICY') ?? 500) + 1,
@@ -74,7 +81,7 @@ export function apply(ctx: Context) {
       }
       const active = isPlanActive(agent)
       const first = !firstPolicySeen.has(session)
-      const text = plannerPolicyText(true, active, first)
+      const text = plannerPolicyText(true, active, first, effective.planning)
       if (text && first) firstPolicySeen.add(session)
       return text
     },
@@ -157,7 +164,9 @@ export function apply(ctx: Context) {
         runList: ({ sessionId }: any) => orchestration.list(sessionId),
         runDetail: ({ runId }: any) => orchestration.detail(runId),
         runCancel: ({ runId }: any) => orchestration.cancel(runId),
-        runResume: ({ runId }: any) => orchestration.resume(runId),
+        runResume: ({ runId }: any) => settings.get().recovery.allowSafeResume
+          ? orchestration.resume(runId)
+          : Promise.resolve({ ok: false, reason: 'Safe resume is disabled in Settings → Plan Mode.' }),
         runCleanup: ({ runId }: any) => orchestration.cleanup(runId),
         externalPreflight: async (body: any) => {
           const cwd = typeof body.cwd === 'string' ? await repoRoot(body.cwd) : undefined
@@ -191,10 +200,13 @@ export function apply(ctx: Context) {
     return () => { disposed = true; disposeTransport?.() }
   }, 'plan-orchestrator: rpc'))
 
-  // Validate already-persisted fixed routes eagerly when settings change, but
-  // never mutate them silently if an adapter disappears.
+  // Validate persisted routes when enabled. Disabling is also a hard runtime
+  // cancellation boundary, independent of the next agent event.
   settings.watch(value => {
-    if (!value.enabled) return
+    if (!value.enabled) {
+      void orchestration.cancelAll('Plan Orchestrator disabled in settings').catch((error: any) => c.logger?.warn?.('plan-orchestrator disable cancellation failed: %o', error))
+      return
+    }
     for (const role of Object.values(value.roles) as RoleRoute[]) {
       if (role.mode === 'fixed') void validateFixedRoute(c.llm, role).catch((error: any) => c.logger?.warn?.('plan-orchestrator fixed route unavailable: %s', error.message))
     }
