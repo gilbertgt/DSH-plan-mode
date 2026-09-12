@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { posix, win32 } from 'node:path'
+import { posix } from 'node:path'
 
 export interface PlanTask {
   id: string; title: string; objective: string; read: string[]; modify: string[]; decisionLocks: string[];
@@ -10,12 +10,19 @@ export interface PlanArtifact {
   planModeVersion: 1; summary: string; complexity: 'small'|'medium'|'large'; decisionLocks: string[]; tasks: PlanTask[];
   validationStrategy: string[]; validationCommands: ValidationCommand[]; risks: string[]; outOfScope: string[]
 }
+export interface ParsedValidationCommand {
+  manager: 'npm'|'pnpm'|'yarn'|'bun'
+  script: string
+  args: string[]
+}
 const TOP = new Set(['planModeVersion','summary','complexity','decisionLocks','tasks','validationStrategy','validationCommands','risks','outOfScope'])
 const TASK = new Set(['id','title','objective','read','modify','decisionLocks','requiredChanges','acceptanceCriteria','validation','dependsOn','parallelSafe'])
 const VCMD = new Set(['id','taskIds','command','timeoutMs'])
 const glob = /[*?\[\]{}!]/
 const drive = /^[A-Za-z]:[\\/]/
 const bytes = (s:string) => Buffer.byteLength(s, 'utf8')
+const SAFE_VALIDATION_TOKEN = /^[A-Za-z0-9_./:@+=,-]+$/
+const MANAGERS = new Set(['npm','pnpm','yarn','bun'])
 const stringArray = (v:unknown, field:string): string[] => {
   if (!Array.isArray(v) || v.some(x => typeof x !== 'string')) throw new Error(`${field} must be a string array`)
   return [...v]
@@ -23,6 +30,42 @@ const stringArray = (v:unknown, field:string): string[] => {
 function strictKeys(value: Record<string, unknown>, allowed:Set<string>, where:string) {
   const unknown = Object.keys(value).filter(k => !allowed.has(k)); if (unknown.length) throw new Error(`${where} has unknown field(s): ${unknown.join(', ')}`)
 }
+
+/**
+ * Validation is intentionally not an arbitrary shell surface. The Planner may
+ * select an existing project package script, but it cannot inject redirection,
+ * pipes, command substitution, inline interpreters, download-and-execute tools,
+ * or an arbitrary executable into the host validation phase.
+ */
+export function parseValidationCommand(command:string): ParsedValidationCommand {
+  if (typeof command !== 'string' || !command.trim() || command.includes('\0') || bytes(command) > 2048) {
+    throw new Error('validation command invalid')
+  }
+  const tokens = command.trim().split(/\s+/)
+  if (tokens.some(token => !SAFE_VALIDATION_TOKEN.test(token))) {
+    throw new Error('validation command may contain only conservative package-script tokens')
+  }
+  const rawManager = tokens.shift()!.toLowerCase()
+  const manager = rawManager.replace(/\.(?:cmd|exe)$/i, '')
+  if (!MANAGERS.has(manager)) throw new Error('validation command must use npm, pnpm, yarn, or bun package scripts')
+
+  const action = tokens.shift()
+  let script: string | undefined
+  if (action === 'test') script = 'test'
+  else if (action === 'run') script = tokens.shift()
+  if (!script || !/^[A-Za-z0-9_.:@/-]{1,128}$/.test(script) || script === '.' || script === '..' || script.includes('../')) {
+    throw new Error('validation command must select one existing package script')
+  }
+
+  let args: string[] = []
+  if (tokens.length) {
+    if (tokens[0] !== '--') throw new Error('validation command arguments must follow --')
+    args = tokens.slice(1)
+    if (args.some(arg => arg === '--' || !SAFE_VALIDATION_TOKEN.test(arg))) throw new Error('validation command arguments invalid')
+  }
+  return { manager: manager as ParsedValidationCommand['manager'], script, args }
+}
+
 export function normalizeOwnedPath(raw:string): string {
   if (!raw || raw.includes('\0') || raw.includes('\\')) throw new Error(`invalid owned path: ${JSON.stringify(raw)}`)
   if (raw.startsWith('/') || drive.test(raw) || glob.test(raw) || raw.endsWith('/')) throw new Error(`owned path must be an exact repository-relative file: ${raw}`)
@@ -68,6 +111,7 @@ export function validatePlanArtifact(input:unknown, requireExplicitOwnership=tru
     if (typeof c.id !== 'string' || !c.id.trim() || commandIds.has(c.id)) throw new Error(`invalid/duplicate validation command id`); commandIds.add(c.id)
     const taskIds=stringArray(c.taskIds,`validationCommands[${i}].taskIds`); if (!taskIds.length || taskIds.some(id=>!ids.has(id))) throw new Error(`validationCommands[${i}] references unknown task`)
     if (typeof c.command !== 'string' || !c.command.trim() || c.command.includes('\0') || bytes(c.command)>2048) throw new Error(`validationCommands[${i}].command invalid`)
+    try { parseValidationCommand(c.command) } catch (error) { throw new Error(`validationCommands[${i}].command unsafe: ${(error as Error).message}`) }
     if (!Number.isSafeInteger(c.timeoutMs) || (c.timeoutMs as number)<1 || (c.timeoutMs as number)>600000) throw new Error(`validationCommands[${i}].timeoutMs invalid`)
     return {id:c.id as string, taskIds, command:c.command, timeoutMs:c.timeoutMs as number}
   })
