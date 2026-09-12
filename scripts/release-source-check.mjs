@@ -33,6 +33,11 @@ if (strict) {
   if (process.env.GITHUB_SHA && process.env.GITHUB_SHA !== head) {
     throw new Error(`release blocked: checkout HEAD ${head} != GITHUB_SHA ${process.env.GITHUB_SHA}`)
   }
+  try {
+    git(['merge-base', '--is-ancestor', head, 'origin/main'])
+  } catch {
+    throw new Error(`release blocked: tag commit ${head} is not reachable from origin/main`)
+  }
 }
 
 console.log(`release source OK (${pkg.name}@${pkg.version}${strict ? `, ${expectedTag}` : ''})`)
