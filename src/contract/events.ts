@@ -13,15 +13,17 @@ export type PlanxEvent =
 export function isPlanxEvent(event:any):event is PlanxEvent{return Boolean(event&&typeof event.type==='string'&&event.type.startsWith('planx/')&&event.data&&typeof event.data.runId==='string')}
 
 /**
- * Reject a session event payload that JSON cannot carry losslessly.
+ * Reject the payload shapes this plugin is known to produce accidentally.
  *
- * DSH `Session.append` snapshots `data` through the lossless-JSON validator and
- * throws on an explicitly `undefined` property (absent is fine, `undefined` is
- * not). An optional field must therefore be omitted rather than assigned
- * `undefined`. Failing here names the offending path instead of surfacing an
- * opaque append rejection.
+ * This is deliberately NOT a reimplementation of the DSH lossless-JSON
+ * validator: it catches an explicitly `undefined` optional property (the shape
+ * that caused the PREFLIGHT wedge), plus non-finite numbers, non-JSON
+ * primitives, circular references, sparse arrays, symbol keys and non-plain
+ * objects. It does not claim to match every DSH rule. `Session.append` remains
+ * the authoritative boundary; this guard exists only so a bad payload fails
+ * earlier with a path that names the offending field.
  */
-export function assertLosslessEventData(value:unknown,label:string):void{
+export function assertNoUndefinedEventData(value:unknown,label:string):void{
   const seen=new Set<object>()
   const walk=(node:unknown,path:string):void=>{
     if(node===undefined)throw new Error(`${label} carries an undefined value at ${path}; omit the optional property instead`)
@@ -30,10 +32,13 @@ export function assertLosslessEventData(value:unknown,label:string):void{
     if(typeof node!=='object'||node===null)return
     if(seen.has(node))throw new Error(`${label} carries a circular reference at ${path}`)
     seen.add(node)
-    if(Array.isArray(node)){node.forEach((item,index)=>walk(item,`${path}[${index}]`))}
-    else{
+    if(Array.isArray(node)){
+      if(node.length!==Object.keys(node).length)throw new Error(`${label} carries a sparse array at ${path}`)
+      node.forEach((item,index)=>walk(item,`${path}[${index}]`))
+    }else{
       const prototype=Object.getPrototypeOf(node)
       if(prototype!==Object.prototype&&prototype!==null)throw new Error(`${label} carries a non-plain object at ${path}`)
+      if(Object.getOwnPropertySymbols(node).length)throw new Error(`${label} carries a symbol key at ${path}`)
       for(const [key,item] of Object.entries(node))walk(item,`${path}.${key}`)
     }
     seen.delete(node)

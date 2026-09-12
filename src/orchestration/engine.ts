@@ -37,10 +37,11 @@ interface WorktreeRecord { taskId: string; path: string; baseHead: string; statu
 
 const unionOwnership = (plan: PlanArtifact): string[] => [...new Set(plan.tasks.flatMap(task => task.modify))].sort()
 /**
- * Absent optional route fields must not exist at all. An explicit
- * `reasoningEffort: undefined` is rejected by every DSH lossless-JSON boundary
- * (subagent descriptors, the session log, SDK child options), so the property is
- * constructed only when the live agent actually carries a value.
+ * Absent route fields must not exist at all. An explicit `reasoningEffort:
+ * undefined` is rejected by every DSH lossless-JSON boundary (subagent
+ * descriptors, the session log, SDK child options), so each property is
+ * constructed only when the live agent actually carries a value — including
+ * provider/model, which an unresolved inherited agent legitimately lacks.
  */
 export const currentRoute = (agent: any): RouteChoice => {
   const provider = agent?.options?.provider
@@ -48,8 +49,8 @@ export const currentRoute = (agent: any): RouteChoice => {
   const reasoningEffort = agent?.options?.reasoningEffort
   const maxTokens = agent?.options?.maxTokens
   return {
-    provider,
-    model,
+    ...(provider !== undefined ? { provider: String(provider) } : {}),
+    ...(model !== undefined ? { model: String(model) } : {}),
     ...(reasoningEffort !== undefined ? { reasoningEffort: String(reasoningEffort) } : {}),
     ...(maxTokens !== undefined ? { maxTokens: Number(maxTokens) } : {}),
   } as RouteChoice

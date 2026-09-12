@@ -59,14 +59,24 @@ export function installPlannerRoute(
     const selected = routeAt(route, current, fallbackIndex.get(agent) ?? 0)
     if (!selected) return current
     await ctx.llm.resolveCallConfig(selected)
+    // The routed request must not inherit the previous model's optional controls.
+    // `reasoningEffort` is replaced outright (omitted when the route declares
+    // none) so a fixed route cannot carry a stale effort to a model that does
+    // not support it; `maxTokens` keeps its original fallback to the native
+    // value when the route does not specify one. Neither may ever be written as
+    // an explicit `undefined`, which the DSH lossless-JSON boundaries reject.
+    const { reasoningEffort: _inheritedEffort, maxTokens: inheritedMaxTokens, ...rest } = current
+    void _inheritedEffort
     return {
-      ...current,
+      ...rest,
       provider: selected.provider,
       model: selected.model,
-      // Provider/model behavior is unchanged; only an absent optional control
-      // leaves the native request field untouched instead of nulling it.
       ...(selected.reasoningEffort !== undefined ? { reasoningEffort: selected.reasoningEffort } : {}),
-      ...(selected.maxTokens !== undefined ? { maxTokens: selected.maxTokens } : {}),
+      ...(selected.maxTokens !== undefined
+        ? { maxTokens: selected.maxTokens }
+        : inheritedMaxTokens !== undefined
+          ? { maxTokens: inheritedMaxTokens }
+          : {}),
     }
   })
 

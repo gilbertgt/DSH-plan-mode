@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { PlanArtifact } from '../contract/plan-artifact.ts'
-import { reducePlanxEvents, assertLosslessEventData, type RunPhase, type RunProjection } from '../contract/events.ts'
+import { reducePlanxEvents, assertNoUndefinedEventData, type RunPhase, type RunProjection } from '../contract/events.ts'
 import { RunStore, atomicJson, readJson, type RunManifest } from '../recovery/store.ts'
 import { diagnoseResume, interruptManifest, type RecoveryCheckpoint } from '../recovery/reconcile.ts'
 import { repoRoot } from '../git/repository.ts'
@@ -220,7 +220,19 @@ export class OrchestrationService {
     }
     if (pending.cancelled || this.#pending.get(sessionId) !== pending) return false
 
-    const started = await this.start(pending.launch, pending.runId)
+    let started: boolean
+    try {
+      started = await this.start(pending.launch, pending.runId)
+    } catch (error) {
+      // `runMaintenance` can reject synchronously when the agent is no longer
+      // idle. The run never reached run(), so fail it closed here: otherwise the
+      // pending entry keeps fencing the parent and the manifest stays
+      // APPROVED_PENDING + non-terminal forever.
+      const message = `maintenance launch failed: ${failureMessage(error)}`
+      if (this.#pending.get(sessionId) === pending) this.#pending.delete(sessionId)
+      await this.finalize(pending.launch, pending.runId, terminalPhaseFor(false, message), message).catch(() => {})
+      return false
+    }
     if (pending.cancelled) {
       // cancel() owns abort/terminal persistence. Do not emit a second terminal
       // event if disable raced with the synchronous launch transition.
@@ -370,6 +382,12 @@ export class OrchestrationService {
       if (!failed) {
         try {
           await this.runner(launch, runId, signal)
+          // A runner may cooperate with abort by resolving instead of rejecting.
+          // The run was still cancelled, so it must not be recorded as COMPLETE.
+          if (signal.aborted && terminalPhase === 'COMPLETE') {
+            terminalMessage = 'run aborted before completion'
+            terminalPhase = 'CANCELLED'
+          }
         } catch (error) {
           thrown = error
           failed = true
@@ -390,24 +408,30 @@ export class OrchestrationService {
   private async finalize(launch: OrchestratorLaunch, runId: string, phase: string, message?: string): Promise<void> {
     if (!TERMINAL_PHASES.has(phase)) throw new Error(`plan-orchestrator refusing non-terminal finalize phase: ${phase}`)
     const at = new Date().toISOString()
+    let effectivePhase = phase
+    let effectiveMessage = message
     try {
       const latest = await this.store.readManifest(launch.sessionId, runId)
-      latest.phase = phase
+      latest.phase = effectivePhase
       latest.terminal = true
       await this.store.writeManifest(latest)
     } catch (error) {
-      const message2 = `terminal manifest persistence failed: ${failureMessage(error)}`
-      try { launch.agent?.session?.append?.('planx/finalize-error', { runId, phase, message: message2, at }) } catch { /* containment: the run view is the last resort */ }
-      this.failView(runId, 'FAILED', message2)
+      // Terminal persistence failed: the run cannot be reported as its intended
+      // phase any more. Converge the effective phase on FAILED so no later step
+      // can announce success, and never let this path throw.
+      effectivePhase = 'FAILED'
+      effectiveMessage = `terminal manifest persistence failed: ${failureMessage(error)}`
+      try { launch.agent?.session?.append?.('planx/finalize-error', { runId, phase: effectivePhase, message: effectiveMessage, at }) } catch { /* containment: the run view is the last resort */ }
+      try { this.failView(runId, 'FAILED', effectiveMessage, at) } catch { /* containment: never rethrow out of finalize */ }
     }
     try {
-      this.recordEvent('phase', { runId, phase, ...(message !== undefined ? { message } : {}) })
+      this.recordEvent('phase', { runId, phase: effectivePhase, ...(effectiveMessage !== undefined ? { message: effectiveMessage } : {}) })
     } catch { /* the manifest already records the terminal phase */ }
     try {
       this.append(launch.agent.session, 'planx/run-terminal', {
         runId,
-        phase,
-        ...(message ? { message } : {}),
+        phase: effectivePhase,
+        ...(effectiveMessage ? { message: effectiveMessage } : {}),
         at,
       })
     } catch { /* the manifest already records the terminal phase */ }
@@ -458,18 +482,22 @@ export class OrchestrationService {
 
   private append(session: any, type: string, data: any): void {
     if (!session || typeof session.append !== 'function') throw new Error(`plan-orchestrator cannot persist ${type}: session append unavailable`)
-    assertLosslessEventData(data, type)
+    assertNoUndefinedEventData(data, type)
     session.append(type, data)
   }
 
-  private failView(runId: string, phase: 'FAILED'|'BLOCKED', message: string): void {
+  private failView(runId: string, phase: 'FAILED'|'BLOCKED', message: string, at = new Date().toISOString()): void {
     const view = this.#views.get(runId)
     if (!view) return
     view.phase = phase
     view.status = phase
     view.message = message
-    view.updatedAt = new Date().toISOString()
-    this.append(this.#agents.get(view.sessionId)?.session, 'planx/run-terminal', { runId, phase, message, at: view.updatedAt })
+    view.updatedAt = at
+    // Containment: the caller may already be handling a persistence failure, so
+    // an unavailable session append must not become a second escaping error.
+    try {
+      this.append(this.#agents.get(view.sessionId)?.session, 'planx/run-terminal', { runId, phase, message, at })
+    } catch { /* the run view already carries the terminal phase */ }
   }
 
   private async latestReview(dir: string, round: number): Promise<any> {

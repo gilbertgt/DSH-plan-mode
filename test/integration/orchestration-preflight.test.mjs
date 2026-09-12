@@ -7,7 +7,7 @@ import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { OrchestrationService } from '../../src/orchestration/service.ts'
 import { createOrchestratorRunner, currentRoute } from '../../src/orchestration/engine.ts'
 import { routeChoices } from '../../src/orchestration/role-router.ts'
-import { assertLosslessEventData } from '../../src/contract/events.ts'
+import { assertNoUndefinedEventData } from '../../src/contract/events.ts'
 import { DEFAULT_SETTINGS } from '../../src/contract/settings.ts'
 import { git } from '../../src/git/repository.ts'
 
@@ -52,18 +52,22 @@ const pendingRunner=()=>(_launch,_runId,signal)=>new Promise((_resolve,reject)=>
   signal.addEventListener('abort',fail,{once:true})
 })
 
-function store(root){
+function store(root,{failWriteAt=[]}={}){
   const manifests=new Map()
-  let failWrites=0
+  let writes=0
   return {
     root,
-    failNextWrites(count){failWrites=count},
     runDir(sessionId,runId){return join(root,'sessions',sessionId,runId)},
-    async writeManifest(value){if(failWrites>0){failWrites--;throw new Error('simulated manifest write failure')}manifests.set(value.runId,structuredClone(value))},
+    async writeManifest(value){
+      writes++
+      if(failWriteAt.includes(writes))throw new Error(`simulated manifest write failure #${writes}`)
+      manifests.set(value.runId,structuredClone(value))
+    },
     async readManifest(_sessionId,runId){const value=manifests.get(runId);if(!value)throw new Error('manifest missing');return structuredClone(value)},
     async removeRun(){},
     async listSessionManifests(){return[]},
     manifest(runId){return manifests.get(runId)},
+    get writes(){return writes},
   }
 }
 
@@ -119,9 +123,17 @@ test('phase event without a message carries no message property and is losslessl
 })
 
 test('the payload guard rejects an explicitly undefined optional field and accepts its absence',()=>{
-  assert.throws(()=>assertLosslessEventData({runId:'r',phase:'PREFLIGHT',message:undefined},'planx/run-phase'),/undefined value at planx\/run-phase\.message/)
+  assert.throws(()=>assertNoUndefinedEventData({runId:'r',phase:'PREFLIGHT',message:undefined},'planx/run-phase'),/undefined value at planx\/run-phase\.message/)
   assert.throws(()=>appendLikeDsh([],'planx/run-phase',{runId:'r',phase:'PREFLIGHT',message:undefined}),/non-JSON-serializable/)
-  assert.doesNotThrow(()=>assertLosslessEventData({runId:'r',phase:'PREFLIGHT'},'planx/run-phase'))
+  assert.doesNotThrow(()=>assertNoUndefinedEventData({runId:'r',phase:'PREFLIGHT'},'planx/run-phase'))
+  // The guard names the offending path for the shapes it does claim to catch.
+  assert.throws(()=>assertNoUndefinedEventData({a:{b:[1,undefined]}},'planx/x'),/undefined value at planx\/x\.a\.b\[1\]/)
+  assert.throws(()=>assertNoUndefinedEventData({a:Number.NaN},'planx/x'),/non-finite number/)
+  const circular={};circular.self=circular
+  assert.throws(()=>assertNoUndefinedEventData(circular,'planx/x'),/circular reference/)
+  // eslint-disable-next-line no-sparse-arrays
+  assert.throws(()=>assertNoUndefinedEventData({a:[1,,3]},'planx/x'),/sparse array/)
+  assert.throws(()=>assertNoUndefinedEventData({a:new Date()},'planx/x'),/non-plain object/)
   const events=[]
   assert.doesNotThrow(()=>appendLikeDsh(events,'planx/run-phase',{runId:'r',phase:'PREFLIGHT'}))
   assert.equal(events.length,1)
@@ -137,6 +149,11 @@ test('a current route without reasoningEffort/maxTokens produces a RouteChoice w
   const fromBareAgent=currentRoute({})
   assert.equal('reasoningEffort' in fromBareAgent,false)
   assert.equal('maxTokens' in fromBareAgent,false)
+  // An unresolved inherited agent has no provider/model; those must be absent
+  // too, otherwise the object itself fails the DSH lossless-JSON boundary.
+  assert.equal('provider' in fromBareAgent,false)
+  assert.equal('model' in fromBareAgent,false)
+  assert.notEqual(snapshotJsonValue(fromBareAgent),undefined,'a bare-agent route must still be lossless JSON')
   const populatedAgent=currentRoute({options:{provider:'p',model:'m',reasoningEffort:'high',maxTokens:1234}})
   assert.equal(populatedAgent.reasoningEffort,'high')
   assert.equal(populatedAgent.maxTokens,1234)
@@ -159,6 +176,135 @@ test('a current route without reasoningEffort/maxTokens produces a RouteChoice w
   assert.equal(withFallback.length,2)
   assert.equal('maxTokens' in withFallback[1],false)
   assert.notEqual(snapshotJsonValue(withFallback),undefined)
+})
+
+test('switching a planner to a fixed route must not inherit the previous reasoning effort',async()=>{
+  const {installPlannerRoute}=await import('../../src/planning/planner-route.ts')
+  const handlers=new Map()
+  const ctx={llm:{resolveCallConfig:async()=>{}},on(name,handler){handlers.set(name,handler);return()=>handlers.delete(name)}}
+  installPlannerRoute(ctx,()=>({mode:'fixed',provider:'modelB',model:'modelB',fallbacks:[]}),()=>true,()=>true)
+
+  // The live request already carries the previous model's reasoning effort.
+  const previous={provider:'modelA',model:'modelA',reasoningEffort:'high',maxTokens:321}
+  const routed=await handlers.get('agent/request')({agent:{}},async()=>previous)
+  assert.equal(routed.provider,'modelB')
+  assert.equal(routed.model,'modelB')
+  assert.equal('reasoningEffort' in routed,false,'the previous model effort must not carry over to a route that declares none')
+  assert.equal(Object.values(routed).includes(undefined),false,'no routed field may be an explicit undefined')
+  assert.notEqual(snapshotJsonValue(routed),undefined,'the routed request must be lossless JSON')
+  // maxTokens keeps its original fallback to the native request value.
+  assert.equal(routed.maxTokens,321)
+
+  // A route that declares its own effort still wins.
+  const handlers2=new Map()
+  const ctx2={llm:{resolveCallConfig:async()=>{}},on(name,handler){handlers2.set(name,handler);return()=>handlers2.delete(name)}}
+  installPlannerRoute(ctx2,()=>({mode:'fixed',provider:'modelB',model:'modelB',reasoningEffort:'low',maxTokens:99,fallbacks:[]}),()=>true,()=>true)
+  const explicit=await handlers2.get('agent/request')({agent:{}},async()=>previous)
+  assert.equal(explicit.reasoningEffort,'low')
+  assert.equal(explicit.maxTokens,99)
+  assert.notEqual(snapshotJsonValue(explicit),undefined)
+})
+
+// C2. terminal persistence failure must never announce the original success phase.
+test('a terminal manifest write failure converges on FAILED and never announces COMPLETE',{timeout:TEST_TIMEOUT},async()=>{
+  const root=await mkdtemp(join(tmpdir(),'planx-terminal-fail-'))
+  try{
+    // writes: 1 = approval, 2 = PREFLIGHT, 3 = terminal (fails).
+    const st=store(root,{failWriteAt:[3]})
+    const {agent:a,events}=agent('s-terminal')
+    const service=new OrchestrationService(st,async()=>{})
+    const runId=service.approve({sessionId:'s-terminal',agent:a,artifact:{tasks:[]},planHash:'h'})
+    assert.equal(await service.onParentIdle('s-terminal'),true)
+    await waitFor(()=>events.some(event=>event.type==='planx/run-terminal'),{label:'terminal event'})
+    await waitFor(()=>service.activeRun('s-terminal')===undefined,{label:'run settled'})
+
+    const terminalPhases=events.filter(event=>event.type==='planx/run-terminal').map(event=>event.data.phase)
+    assert.equal(terminalPhases.includes('COMPLETE'),false,`no terminal event may announce COMPLETE after persistence failed: ${terminalPhases.join(',')}`)
+    assert.equal(terminalPhases.every(phase=>phase==='FAILED'),true,`unexpected terminal phases: ${terminalPhases.join(',')}`)
+    const view=service.list('s-terminal').find(item=>item.runId===runId)
+    assert.equal(view.phase,'FAILED')
+    assert.match(String(view.message),/terminal manifest persistence failed/)
+    for(const event of events)if(event.type.startsWith('planx/'))assert.notEqual(snapshotJsonValue(event.data),undefined)
+  }finally{await cleanup(root)}
+})
+
+test('finalize never throws even when terminal persistence and session append both fail',{timeout:TEST_TIMEOUT},async()=>{
+  const root=await mkdtemp(join(tmpdir(),'planx-double-fail-'))
+  try{
+    // The terminal write (3) and every later write fail.
+    const st=store(root,{failWriteAt:[3,4,5,6]})
+    const {agent:a,events}=agent('s-double')
+    // Rejections escaping the run task are surfaced by start(), so capture them.
+    let escaped
+    a.runMaintenance=fn=>{const task=Promise.resolve().then(()=>fn(new AbortController().signal));task.catch(error=>{escaped=error});return task}
+    // Gate the runner so append failures are installed BEFORE finalize runs;
+    // otherwise the run can finish inside the await and never exercise it.
+    let release
+    const gate=new Promise(resolve=>{release=resolve})
+    const service=new OrchestrationService(st,async()=>{await gate})
+    const runId=service.approve({sessionId:'s-double',agent:a,artifact:{tasks:[]},planHash:'h'})
+    const originalAppend=a.session.append.bind(a.session)
+    let failAppends=false
+    a.session.append=(type,data)=>{
+      if(failAppends)throw new Error('session append unavailable')
+      return originalAppend(type,data)
+    }
+    assert.equal(await service.onParentIdle('s-double'),true)
+    await waitFor(()=>events.some(event=>event.type==='planx/run-phase'&&event.data.phase==='PREFLIGHT'),{label:'PREFLIGHT event'})
+    // From here on, every session append fails as well.
+    failAppends=true
+    release()
+    await waitFor(()=>service.activeRun('s-double')===undefined,{label:'run settled'})
+    // finalize() is documented as never throwing: an append failure while
+    // handling a persistence failure must not become a second escaping error.
+    assert.equal(escaped,undefined,`finalize must contain its own failures, got: ${escaped?.message}`)
+    const view=service.list('s-double').find(item=>item.runId===runId)
+    assert.equal(view.phase,'FAILED','the run view is the last resort when persistence and append both fail')
+    assert.match(String(view.message),/terminal manifest persistence failed/)
+  }finally{await cleanup(root)}
+})
+
+test('a failed approval persistence still reports FAILED even when the session append also fails',{timeout:TEST_TIMEOUT},async()=>{
+  const root=await mkdtemp(join(tmpdir(),'planx-approval-fail-'))
+  try{
+    // write 1 = approval persistence (fails), so onParentIdle reports the failure.
+    const st=store(root,{failWriteAt:[1]})
+    const {agent:a}=agent('s-approval')
+    const service=new OrchestrationService(st,async()=>{throw new Error('runner must not start')})
+    const runId=service.approve({sessionId:'s-approval',agent:a,artifact:{tasks:[]},planHash:'h'})
+    const originalAppend=a.session.append.bind(a.session)
+    a.session.append=(type,data)=>{
+      if(type==='planx/run-terminal')throw new Error('session append unavailable')
+      return originalAppend(type,data)
+    }
+    // The unwrapped failView call in onParentIdle must not turn a handled
+    // persistence failure into a rejecting promise.
+    assert.equal(await service.onParentIdle('s-approval'),false)
+    assert.equal(service.shouldFence('s-approval'),false)
+    const view=service.list('s-approval').find(item=>item.runId===runId)
+    assert.equal(view.phase,'FAILED')
+    assert.match(String(view.message),/approval persistence failed/)
+  }finally{await cleanup(root)}
+})
+
+test('a synchronous maintenance launch failure fails the run closed instead of fencing forever',{timeout:TEST_TIMEOUT},async()=>{
+  const root=await mkdtemp(join(tmpdir(),'planx-launch-race-'))
+  try{
+    const st=store(root)
+    const {agent:a}=agent('s-race')
+    // DSH rejects runMaintenance synchronously when the agent left idle.
+    a.runMaintenance=()=>{throw new Error('agent "s-race" already has active work')}
+    const service=new OrchestrationService(st,async()=>{})
+    const runId=service.approve({sessionId:'s-race',agent:a,artifact:{tasks:[]},planHash:'h'})
+    assert.equal(await service.onParentIdle('s-race'),false)
+    assert.equal(service.shouldFence('s-race'),false,'the parent must not stay fenced forever')
+    assert.equal(service.activeRun('s-race'),undefined)
+    await waitFor(()=>st.manifest(runId)?.terminal===true,{label:'terminal manifest after launch failure'})
+    const manifest=st.manifest(runId)
+    assert.equal(manifest.terminal,true)
+    assert.notEqual(manifest.phase,'APPROVED_PENDING')
+    assert.ok(['BLOCKED','FAILED'].includes(manifest.phase),`unexpected phase ${manifest.phase}`)
+  }finally{await cleanup(root)}
 })
 
 // C. failure during initial PREFLIGHT event handling -> run converges to terminal=true.
@@ -195,12 +341,11 @@ test('a failure during initial PREFLIGHT event handling still converges to a ter
 test('a failure writing the initial PREFLIGHT manifest converges to BLOCKED or FAILED',{timeout:TEST_TIMEOUT},async()=>{
   const root=await mkdtemp(join(tmpdir(),'planx-manifest-fail-'))
   try{
-    const st=store(root)
+    // writes: 1 = approval, 2 = the initial PREFLIGHT write (fails).
+    const st=store(root,{failWriteAt:[2]})
     const {agent:a}=agent('s-manifest')
     const service=new OrchestrationService(st,async()=>{})
     const runId=service.approve({sessionId:'s-manifest',agent:a,artifact,planHash:'h'})
-    // The initial PREFLIGHT manifest write is the first write the run performs.
-    st.failNextWrites(1)
     assert.equal(await service.onParentIdle('s-manifest'),true)
     await waitFor(()=>st.manifest(runId)?.terminal===true,{label:'terminal manifest after write failure'})
     const manifest=st.manifest(runId)
@@ -277,5 +422,35 @@ test('normal startup starts the runner and creates baseline plus checkpoint arti
     assert.ok(['BLOCKED','FAILED'].includes(phase),`unexpected phase ${phase}`)
     assert.equal(events.some(event=>event.type==='planx/run-terminal'&&event.data.phase===phase),true)
     for(const event of events)if(event.type.startsWith('planx/'))assert.notEqual(snapshotJsonValue(event.data),undefined)
+  }finally{await cleanup(root)}
+})
+
+// E. A runner that cooperatively resolves on abort must still be reported CANCELLED.
+test('a cooperatively aborted runner is persisted as CANCELLED, never COMPLETE',{timeout:TEST_TIMEOUT},async()=>{
+  const root=await mkdtemp(join(tmpdir(),'planx-coop-cancel-'))
+  try{
+    const st=store(root)
+    const {agent:a,events}=agent('s-coop')
+    const service=new OrchestrationService(st,async(_launch,_runId,signal)=>{
+      // Resolve cleanly on abort instead of rejecting.
+      await new Promise(resolve=>{
+        if(signal.aborted)return resolve()
+        signal.addEventListener('abort',()=>resolve(),{once:true})
+      })
+    })
+    const runId=service.approve({sessionId:'s-coop',agent:a,artifact:{tasks:[]},planHash:'h'})
+    assert.equal(await service.onParentIdle('s-coop'),true)
+    await waitFor(()=>st.manifest(runId)?.phase==='PREFLIGHT',{label:'PREFLIGHT started'})
+    assert.equal(await service.cancelSession('s-coop','user requested stop'),true)
+    await waitFor(()=>st.manifest(runId)?.terminal===true,{label:'terminal manifest'})
+
+    const manifest=st.manifest(runId)
+    assert.equal(manifest.terminal,true)
+    assert.notEqual(manifest.phase,'COMPLETE','a cancelled run must not be reported as COMPLETE')
+    assert.ok(['CANCELLED','BLOCKED','FAILED'].includes(manifest.phase),`unexpected phase ${manifest.phase}`)
+    const view=service.list('s-coop').find(item=>item.runId===runId)
+    assert.notEqual(view.phase,'COMPLETE')
+    const terminalPhases=events.filter(event=>event.type==='planx/run-terminal').map(event=>event.data.phase)
+    assert.equal(terminalPhases.includes('COMPLETE'),false,`terminal events must not announce COMPLETE: ${terminalPhases.join(',')}`)
   }finally{await cleanup(root)}
 })
