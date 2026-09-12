@@ -119,12 +119,19 @@ export function apply(ctx: Context) {
   })
 
   c.on('session/event', (session: any, event: any) => {
-    if (event.type === 'plan/mode') {
-      firstPolicySeen.delete(session)
-      if (!event.data.active) {
-        bridge.clearSession(String(session.id))
-        readOnly.deactivate(session, c.sandboxPolicy)
-      }
+    if (event.type !== 'plan/mode') return
+    firstPolicySeen.delete(session)
+    const enabled = settings.effective(session.header?.cwd).enabled
+    if (!enabled) {
+      // Cleanup only: remove state previously owned by the plugin, then leave
+      // native Plan Mode untouched while Plan Orchestrator is disabled.
+      bridge.clearSession(String(session.id))
+      readOnly.deactivate(session, c.sandboxPolicy)
+      return
+    }
+    if (!event.data.active) {
+      bridge.clearSession(String(session.id))
+      readOnly.deactivate(session, c.sandboxPolicy)
     }
   })
 
