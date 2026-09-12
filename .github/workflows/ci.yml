@@ -10,7 +10,7 @@ on:
         default: false
         type: boolean
 concurrency:
-  group: plan-mode-${{ github.workflow }}-${{ github.ref }}
+  group: plan-mode-v2-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 permissions:
   contents: read
@@ -20,10 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '22.19.0' }
-      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
@@ -36,18 +36,18 @@ jobs:
           PLANX_COEXISTENCE: '1'
 
   windows-rc1:
-    name: Windows rc.1 package E2E / Node 22
+    name: Windows rc.1 behavior / Node 22
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '22.19.0' }
-      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run test:platform
-      - run: npm run typecheck
+      # Build is required by the Windows E2E path. Typecheck and package-policy
+      # verification are intentionally not duplicated from the Ubuntu lane.
       - run: npm run build
-      - run: npm run pack:check
       - run: npm run e2e:rc1
 
   platform-node24:
@@ -59,8 +59,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '24' }
       # Deliberately dependency-free: Node 22 release lanes already cover
       # typecheck/build/package. This lane catches OS/Node machine behavior.
@@ -73,10 +73,10 @@ jobs:
     timeout-minutes: 25
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '22.19.0' }
-      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Overlay rc.2 API packages
         run: >-
           npm install --force --ignore-scripts --no-save
