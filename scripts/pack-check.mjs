@@ -2,8 +2,9 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-const output = execFileSync(npm, ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+const npmCli = process.env.npm_execpath
+if (!npmCli) throw new Error('npm_execpath unavailable; run pack-check through npm')
+const output = execFileSync(process.execPath, [npmCli, 'pack', '--dry-run', '--json', '--ignore-scripts'], {
   cwd: new URL('..', import.meta.url),
   encoding: 'utf8',
   windowsHide: true,

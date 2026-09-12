@@ -8,7 +8,8 @@ import net from 'node:net'
 
 const require = createRequire(import.meta.url)
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const npmCli = process.env.npm_execpath
+if (!npmCli) throw new Error('npm_execpath unavailable; run rc.1 E2E through npm')
 const dshPackage = require.resolve('@deepseek-ai/dsh/package.json')
 const dshBin = join(dirname(dshPackage), 'lib', 'bin.js')
 const home = mkdtempSync(join(tmpdir(), 'planx-dsh-home-'))
@@ -25,6 +26,7 @@ function command(command, args, options = {}) {
     ...options,
   })
 }
+function npmCommand(args, options) { return command(process.execPath, [npmCli, ...args], options) }
 function dsh(args, options) { return command(process.execPath, [dshBin, ...args], options) }
 function assertIncludes(text, needle, label) {
   if (!text.includes(needle)) throw new Error(`${label} missing ${needle}`)
@@ -71,7 +73,7 @@ async function stopTree(child) {
 
 let tarball
 try {
-  const packed = JSON.parse(command(npm, ['pack', '--json', '--ignore-scripts']))[0]
+  const packed = JSON.parse(npmCommand(['pack', '--json', '--ignore-scripts']))[0]
   if (!packed?.filename) throw new Error('npm pack produced no tarball')
   tarball = resolve(root, packed.filename)
   const packedPaths = new Set((packed.files ?? []).map(entry => entry.path))
