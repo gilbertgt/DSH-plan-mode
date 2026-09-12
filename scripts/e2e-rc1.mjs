@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { mkdtempSync, rmSync, unlinkSync, existsSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import net from 'node:net'
@@ -15,6 +15,23 @@ const dshBin = join(dirname(dshPackage), 'lib', 'bin.js')
 const home = mkdtempSync(join(tmpdir(), 'planx-dsh-home-'))
 const profile = 'planx-e2e'
 const env = { ...process.env, DSH_HOME: home, NO_COLOR: '1', CI: '1' }
+
+// npm 10 on Windows can generate a local pnpm.cmd shim whose relative target
+// breaks once DSH changes cwd into a profile directory. Give DSH a test-local
+// launcher that resolves pnpm's declared bin entry absolutely instead. This
+// keeps the smoke test independent of any globally installed pnpm.
+if (process.platform === 'win32') {
+  const pnpmPackagePath = join(root, 'node_modules', 'pnpm', 'package.json')
+  const pnpmPackage = JSON.parse(readFileSync(pnpmPackagePath, 'utf8'))
+  const pnpmBin = typeof pnpmPackage.bin === 'string' ? pnpmPackage.bin : pnpmPackage.bin?.pnpm
+  if (typeof pnpmBin !== 'string' || !pnpmBin) throw new Error('pnpm package does not declare a pnpm bin entry')
+  const pnpmEntry = resolve(dirname(pnpmPackagePath), pnpmBin)
+  const shimDir = join(home, 'test-bin')
+  mkdirSync(shimDir, { recursive: true })
+  writeFileSync(join(shimDir, 'pnpm.cmd'), `@echo off\r\n"${process.execPath}" "${pnpmEntry}" %*\r\n`, 'utf8')
+  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  env[pathKey] = `${shimDir}${delimiter}${process.env[pathKey] ?? ''}`
+}
 
 function command(command, args, options = {}) {
   return execFileSync(command, args, {
@@ -86,8 +103,7 @@ try {
   // profile, which has no Web listener to exercise in the boot smoke below.
   dsh(['--profile', profile, '--from-default-profile', 'web', '--help'])
 
-  // Real install into the fresh named Web profile. The npm-script PATH contains
-  // the pinned local pnpm binary used by DSH's plugin manager.
+  // Real install into the fresh named Web profile.
   dsh(['plugin', '--profile', profile, 'add', tarball, '--ignore-scripts'])
   const dump = dsh(['--profile', profile, '--dump-config'])
   assertIncludes(dump, '@gilbertgt/dsh-plan-orchestrator', 'installed profile')
