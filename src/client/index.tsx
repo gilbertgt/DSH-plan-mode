@@ -6,7 +6,7 @@ import { PlanModeSection } from './section.tsx'
 import { RunChip } from './run-chip.tsx'
 import { RunOverlay, RunOverlayService } from './run-overlay.tsx'
 import { SETTINGS_NAMESPACE } from '../contract/settings.ts'
-import { validateSettings, type PlanSettings } from '../contract/settings.ts'
+import { validateSettings } from '../contract/settings.ts'
 
 export const inject = ['slots', 'locale', 'connection', 'settingsScope', 'sessions']
 
@@ -23,7 +23,7 @@ export function apply(ctx: any) {
 
   const t = ctx.locale.bind(NS)
   const rpc = createRpc()
-  const settingsScope = ctx.settingsScope.bind<PlanSettings>({
+  const settingsScope = ctx.settingsScope.bind({
     namespace: SETTINGS_NAMESPACE,
     decode(value: unknown) {
       try { return validateSettings(value) } catch { return undefined }

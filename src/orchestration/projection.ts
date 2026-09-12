@@ -43,6 +43,9 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
     planOrchestrator: State
   }
+  interface SessionProjectionMap {
+    planOrchestrator: State
+  }
 }
 
 function replaceRun(state: State, run: RunProjection): State {
