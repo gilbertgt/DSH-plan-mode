@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { OrchestrationService } from '../../src/orchestration/service.ts'
 import { createOrchestratorRunner, currentRoute } from '../../src/orchestration/engine.ts'
 import { routeChoices } from '../../src/orchestration/role-router.ts'
@@ -13,12 +12,26 @@ import { git } from '../../src/git/repository.ts'
 
 const TEST_TIMEOUT = 60_000
 
+/**
+ * Dependency-free snapshot helper for the plain payload shapes exercised by
+ * this test file. Production DSH Session.append remains the authoritative
+ * lossless-JSON boundary; this helper only keeps the Node 24 platform lane
+ * dependency-free while reproducing the undefined/non-JSON failures covered
+ * here.
+ */
+function snapshotJsonValue(value){
+  try{
+    assertNoUndefinedEventData(value,'test-snapshot')
+    const encoded=JSON.stringify(value)
+    return encoded===undefined?undefined:JSON.parse(encoded)
+  }catch{return undefined}
+}
+
 const artifact={planModeVersion:1,summary:'x',complexity:'small',decisionLocks:[],tasks:[{id:'t1',title:'t',objective:'o',read:['a.ts'],modify:['a.ts'],decisionLocks:[],requiredChanges:['x'],acceptanceCriteria:['ok'],validation:[],dependsOn:[],parallelSafe:false}],validationStrategy:[],validationCommands:[],risks:[],outOfScope:[]}
 
 /**
- * Mirrors DSH `Session.append`: the payload must survive the lossless-JSON
- * snapshot boundary. The real append throws when `snapshotJsonValue` returns
- * undefined, which is exactly what an explicitly `undefined` property does.
+ * Mirrors the Session.append contract for the payload shapes under test: the
+ * payload must survive our local JSON-safety guard and a detached JSON copy.
  */
 function appendLikeDsh(events,type,data){
   const snapshot=snapshotJsonValue(data)
