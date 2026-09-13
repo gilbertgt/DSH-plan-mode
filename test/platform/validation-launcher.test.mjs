@@ -58,6 +58,20 @@ async function runInPowerShell(command, cwd) {
 }
 
 /**
+ * Extract the diagnostic text from a captured subprocess failure.
+ *
+ * `execFileCaptured` attaches Buffer stdout/stderr to its Command-failed error.
+ * `String(buffer)` happens to equal `buffer.toString('utf8')` for UTF-8 data,
+ * but naming the Buffer case explicitly keeps the diagnostic exact and survives
+ * a future seam that returns a different encoding or a non-Buffer shape.
+ */
+function errorText(error) {
+  const stderr = error?.stderr
+  if (Buffer.isBuffer(stderr)) return stderr.toString('utf8')
+  return String(stderr ?? error?.message ?? error)
+}
+
+/**
  * Confirms the selected launcher is runnable on this image before a test asserts
  * through it. The npm regression test below is the one this build must keep
  * exercising, so a host without a working npm skips loudly instead of failing.
@@ -66,7 +80,7 @@ async function requireRunnableNpm(t) {
   const launcher = packageManagerLauncher('npm', { platform: 'win32' })
   try { await runInPowerShell(`${launcher} --version`, process.cwd()) }
   catch (error) {
-    t.skip(`${launcher} is not runnable on this host: ${String(error.stderr ?? error.message).split('\n')[0]}`)
+    t.skip(`${launcher} is not runnable on this host: ${errorText(error).split('\n')[0]}`)
     return undefined
   }
   return launcher
@@ -95,7 +109,7 @@ test(`a resolved Windows launcher reaches the real npm under ${shellLabel}'s Exe
     // meaningful on permissive images instead of silently proving nothing.
     let unsuffixedBlocked = false
     try { await runInPowerShell('npm run launcher-probe', d) }
-    catch (error) { unsuffixedBlocked = /PSSecurityException|running scripts is disabled|cannot be loaded/i.test(String(error.stderr ?? error.message)) }
+    catch (error) { unsuffixedBlocked = /PSSecurityException|running scripts is disabled|cannot be loaded/i.test(errorText(error)) }
     if (unsuffixedBlocked) {
       // `runInPowerShell` is async, so the rejection is asserted with
       // `assert.rejects`; `assert.throws` cannot observe a rejected promise.

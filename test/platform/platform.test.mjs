@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -10,17 +10,19 @@ import { minimalSdkEnv, sdkHarnessOptions } from '../../src/orchestration/sdk-ba
 
 test('platform supports CJK and spaces through Git machine output', async()=>{
   const root=await mkdtemp(join(tmpdir(),'planx 平台 '))
-  // Confined Windows grandchildren cannot open libuv's named-pipe stdio, so a
-  // Git call that captures output must use the file-backed seam. Calls that
-  // need no output keep `stdio: 'ignore'`, which the restricted token permits.
-  execFileSync('git',['init'],{cwd:root,stdio:'ignore'})
-  execFileSync('git',['config','user.email','test@example.com'],{cwd:root,stdio:'ignore'})
-  execFileSync('git',['config','user.name','test'],{cwd:root,stdio:'ignore'})
-  await writeFile(join(root,'初始.txt'),'base')
-  execFileSync('git',['add','.'],{cwd:root,stdio:'ignore'});execFileSync('git',['commit','-m','base'],{cwd:root,stdio:'ignore'})
-  await writeFile(join(root,'韓文 이름.txt'),'x')
-  const out=(await execFileCaptured('git',['ls-files','--others','--exclude-standard','-z'],{cwd:root})).stdout
-  assert.match(out.toString('utf8'),/韓文 이름\.txt/)
+  try{
+    // Confined Windows grandchildren cannot open libuv's named-pipe stdio, so a
+    // Git call that captures output must use the file-backed seam. Calls that
+    // need no output keep `stdio: 'ignore'`, which the restricted token permits.
+    execFileSync('git',['init'],{cwd:root,stdio:'ignore'})
+    execFileSync('git',['config','user.email','test@example.com'],{cwd:root,stdio:'ignore'})
+    execFileSync('git',['config','user.name','test'],{cwd:root,stdio:'ignore'})
+    await writeFile(join(root,'初始.txt'),'base')
+    execFileSync('git',['add','.'],{cwd:root,stdio:'ignore'});execFileSync('git',['commit','-m','base'],{cwd:root,stdio:'ignore'})
+    await writeFile(join(root,'韓文 이름.txt'),'x')
+    const out=(await execFileCaptured('git',['ls-files','--others','--exclude-standard','-z'],{cwd:root})).stdout
+    assert.match(out.toString('utf8'),/韓文 이름\.txt/)
+  }finally{await rm(root,{recursive:true,force:true})}
 })
 
 test('SDK child launch options preserve worktree cwd and exact role route',()=>{
@@ -31,9 +33,11 @@ test('SDK child launch options preserve worktree cwd and exact role route',()=>{
 
 test('symlink/junction escape is rejected (where platform permits symlinks)', async(t)=>{
   const base=await mkdtemp(join(tmpdir(),'planx-boundary-')),root=join(base,'repo'),outside=join(base,'outside')
-  await mkdir(root);await mkdir(outside);execFileSync('git',['init'],{cwd:root,stdio:'ignore'})
-  try{await symlink(outside,join(root,'escape'),process.platform==='win32'?'junction':'dir')}catch(e){t.skip(`symlink unavailable: ${e.code??e}`);return}
-  await assert.rejects(()=>assertRepoPathConfined(root,'escape/file.txt'),/escapes repository/)
+  try{
+    await mkdir(root);await mkdir(outside);execFileSync('git',['init'],{cwd:root,stdio:'ignore'})
+    try{await symlink(outside,join(root,'escape'),process.platform==='win32'?'junction':'dir')}catch(e){t.skip(`symlink unavailable: ${e.code??e}`);return}
+    await assert.rejects(()=>assertRepoPathConfined(root,'escape/file.txt'),/escapes repository/)
+  }finally{await rm(base,{recursive:true,force:true})}
 })
 
 test('SDK environment scrubs unrelated secrets while retaining runtime and provider credentials',()=>{
