@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { parseValidationCommand } from '../contract/plan-artifact.ts'
 import { snapshotDirty, snapshotHash } from '../git/fingerprints.ts'
 import { fullHead } from '../git/repository.ts'
-import { hashBytes, type ValidationReceipt } from './receipts.ts'
+import { hashBytes, type ValidationReceipt, type ValidationSandboxFacts } from './receipts.ts'
 
 let configuredShell: any
 
@@ -43,6 +43,22 @@ export interface RunValidationOptions {
   sessionId?: string
 }
 
+function sandboxFacts(value: any): ValidationSandboxFacts | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  return {
+    ...(typeof value.mode === 'string' ? { mode: value.mode } : {}),
+    denied: Boolean(value.denied),
+    ...(typeof value.enforcement === 'string' ? { enforcement: value.enforcement } : {}),
+    ...(typeof value.runnerFailed === 'boolean' ? { runnerFailed: value.runnerFailed } : {}),
+  }
+}
+
+function sandboxEnforcementAccepted(sandbox: ValidationSandboxFacts | undefined): boolean {
+  if (!sandbox || sandbox.runnerFailed === true) return false
+  if (sandbox.enforcement === 'full') return true
+  return process.platform === 'win32' && sandbox.enforcement === 'partial'
+}
+
 export async function runValidation(opts: RunValidationOptions): Promise<ValidationReceipt> {
   const shell = opts.shell ?? configuredShell
   if (!shell?.resolve || !shell?.run) throw new Error('sandboxed DSH shell executor unavailable for host validation')
@@ -71,8 +87,8 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
   const timedOut = Boolean(result?.timedOut)
   const aborted = Boolean(result?.aborted)
   const exitCode = typeof result?.exitCode === 'number' ? result.exitCode : null
-  const sandbox = result?.sandbox
-  const sandboxIncomplete = !sandbox || sandbox.runnerFailed === true || sandbox.enforcement !== 'full'
+  const sandbox = sandboxFacts(result?.sandbox)
+  const sandboxIncomplete = !sandboxEnforcementAccepted(sandbox)
   const sandboxDenied = Boolean(sandbox?.denied)
 
   const validationDir = join(opts.runDir, 'validation')
@@ -118,6 +134,7 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
       bytes: stderr.length,
       truncated: stderrTruncated,
     },
+    ...(sandbox ? { sandbox } : {}),
     boundHead: head,
     ownershipFingerprint: opts.ownershipFingerprint ?? snapshotHash(after),
     complete: !sandboxIncomplete && !sandboxDenied && !timedOut && !aborted && !stdoutTruncated && !stderrTruncated,
