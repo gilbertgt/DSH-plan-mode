@@ -1,8 +1,9 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { parseValidationCommand } from '../contract/plan-artifact.ts'
+import type { ParsedValidationCommand } from '../contract/plan-artifact.ts'
 import { snapshotDirty, snapshotHash } from '../git/fingerprints.ts'
 import { fullHead } from '../git/repository.ts'
+import { resolveValidationExecutable, type LauncherOptions } from './launcher.ts'
 import { hashBytes, type ValidationReceipt, type ValidationSandboxFacts } from './receipts.ts'
 
 let configuredShell: any
@@ -19,8 +20,7 @@ function safe(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 160)
 }
 
-async function assertExistingPackageScript(cwd: string, command: string): Promise<void> {
-  const parsed = parseValidationCommand(command)
+async function assertExistingPackageScript(cwd: string, parsed: ParsedValidationCommand): Promise<void> {
   let pkg: any
   try { pkg = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) }
   catch (error) { throw new Error(`validation requires readable package.json: ${(error as Error).message}`) }
@@ -41,6 +41,8 @@ export interface RunValidationOptions {
   ownershipFingerprint?: string
   shell?: any
   sessionId?: string
+  /** Platform/environment/probe overrides for launcher resolution; a test seam only. */
+  launcher?: LauncherOptions
 }
 
 function sandboxFacts(value: any): ValidationSandboxFacts | undefined {
@@ -62,7 +64,11 @@ function sandboxEnforcementAccepted(sandbox: ValidationSandboxFacts | undefined)
 export async function runValidation(opts: RunValidationOptions): Promise<ValidationReceipt> {
   const shell = opts.shell ?? configuredShell
   if (!shell?.resolve || !shell?.run) throw new Error('sandboxed DSH shell executor unavailable for host validation')
-  await assertExistingPackageScript(opts.cwd, opts.command)
+  // Parsing happens inside the resolver, before the shell exists in any form:
+  // an unsafe command and a nonexistent package script are both rejected ahead
+  // of `shell.resolve`, and launcher probing only ever sees a parsed manager.
+  const { parsed, executableCommand } = resolveValidationExecutable(opts.command, opts.launcher)
+  await assertExistingPackageScript(opts.cwd, parsed)
 
   const before = await snapshotDirty(opts.cwd)
   const head = await fullHead(opts.cwd)
@@ -73,7 +79,7 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
     ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
   }
   const spec = shell.resolve({
-    command: opts.command,
+    command: executableCommand,
     workdir: opts.cwd,
     timeoutMs: opts.timeoutMs,
     stdoutMaxBytes: opts.capBytes,

