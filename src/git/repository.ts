@@ -1,10 +1,12 @@
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { lstat, realpath } from 'node:fs/promises'
 import { dirname, resolve, sep } from 'node:path'
-const execFileP=promisify(execFile)
+import { execFileCaptured } from '../platform/captured-exec.ts'
+
 export interface GitResult{stdout:Buffer;stderr:Buffer}
-export async function git(cwd:string,args:string[],opts:{maxBuffer?:number}={}):Promise<GitResult>{const r=await execFileP('git',args,{cwd,encoding:'buffer',maxBuffer:opts.maxBuffer??32*1024*1024,windowsHide:true});return {stdout:r.stdout as Buffer,stderr:r.stderr as Buffer}}
+export async function git(cwd:string,args:string[],opts:{maxBuffer?:number}={}):Promise<GitResult>{
+ const r=await execFileCaptured('git',args,{cwd,maxBuffer:opts.maxBuffer??32*1024*1024})
+ return {stdout:r.stdout,stderr:r.stderr}
+}
 export function decodeUtf8Strict(buf:Buffer){return new TextDecoder('utf-8',{fatal:true}).decode(buf)}
 export function splitNul(buf:Buffer){const text=decodeUtf8Strict(buf);if(!text)return[];const parts=text.split('\0');if(parts.at(-1)==='')parts.pop();return parts}
 export async function repoRoot(cwd:string){return decodeUtf8Strict((await git(cwd,['rev-parse','--show-toplevel'])).stdout).trim()}

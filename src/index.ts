@@ -1,6 +1,4 @@
 import { createRequire } from 'node:module'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import { registerSettings } from './settings-service.ts'
 import { NativePlanBridge, consumeApprovedPlanResult, installExitPlanValidator } from './planning/native-plan-bridge.ts'
@@ -15,6 +13,7 @@ import { RunStore } from './recovery/store.ts'
 import { installIssueCommand } from './external/issue-command.ts'
 import { ghPreflight } from './external/github.ts'
 import { repoRoot } from './git/repository.ts'
+import { execFileCaptured } from './platform/captured-exec.ts'
 import { configureValidationShell } from './validation/runner.ts'
 import { configureRoleTimeoutResolver } from './runtime-policy.ts'
 import type { RoleRoute } from './contract/settings.ts'
@@ -22,7 +21,6 @@ import type { RoleRoute } from './contract/settings.ts'
 export const name = 'plan-orchestrator'
 export const inject = ['settings', 'tools', 'llm', 'sessions', 'subagents', 'systemPrompt', 'sandboxPolicy', 'sessionProjections', 'shell']
 
-const execFileP = promisify(execFile)
 const require = createRequire(import.meta.url)
 
 function packageVersion(id: string): string | undefined {
@@ -31,7 +29,7 @@ function packageVersion(id: string): string | undefined {
 }
 
 async function commandAvailable(command: string, args: string[]): Promise<boolean> {
-  try { await execFileP(command, args, { windowsHide: true, timeout: 5_000 }); return true }
+  try { await execFileCaptured(command, args, { timeoutMs: 5_000, maxBuffer: 1024 * 1024 }); return true }
   catch { return false }
 }
 

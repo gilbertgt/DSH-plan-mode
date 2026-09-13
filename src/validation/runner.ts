@@ -5,7 +5,7 @@ import { snapshotDirty, snapshotHash } from '../git/fingerprints.ts'
 import { fullHead } from '../git/repository.ts'
 import { materializeValidationDependencies } from './dependencies.ts'
 import { resolveValidationExecutable, type LauncherOptions } from './launcher.ts'
-import { hashBytes, type ValidationReceipt, type ValidationSandboxFacts } from './receipts.ts'
+import { hashBytes, type ValidationDiagnostic, type ValidationReceipt, type ValidationSandboxFacts } from './receipts.ts'
 
 let configuredShell: any
 
@@ -58,10 +58,32 @@ function sandboxFacts(value: any): ValidationSandboxFacts | undefined {
   }
 }
 
-function sandboxEnforcementAccepted(sandbox: ValidationSandboxFacts | undefined): boolean {
+function sandboxEnforcementAccepted(sandbox: ValidationSandboxFacts | undefined, platform: NodeJS.Platform = process.platform): boolean {
   if (!sandbox || sandbox.runnerFailed === true) return false
   if (sandbox.enforcement === 'full') return true
-  return process.platform === 'win32' && sandbox.enforcement === 'partial'
+  return platform === 'win32' && sandbox.enforcement === 'partial'
+}
+
+/**
+ * DSH's Windows WRITE_RESTRICTED backend documents that confined
+ * grandchildren using libuv piped stdio can fail with EPERM. That is a
+ * validation-infrastructure failure, not evidence that a test assertion
+ * failed. Keep it fail-closed and machine-readable so callers never mistake it
+ * for a genuine FAIL or silently retry unconfined.
+ */
+export function validationInfrastructureDiagnostic(
+  platform: NodeJS.Platform,
+  sandbox: ValidationSandboxFacts | undefined,
+  exitCode: number | null,
+  stdout: Buffer | string,
+  stderr: Buffer | string,
+): ValidationDiagnostic | undefined {
+  if (platform !== 'win32' || sandbox?.enforcement !== 'partial' || exitCode === 0) return undefined
+  const text = `${String(stdout)}\n${String(stderr)}`
+  if (/\bspawn\s+EPERM\b/i.test(text) && /\bsyscall:\s*['"]spawn['"]/i.test(text)) {
+    return 'WINDOWS_SANDBOX_NESTED_PIPE_EPERM'
+  }
+  return undefined
 }
 
 export async function runValidation(opts: RunValidationOptions): Promise<ValidationReceipt> {
@@ -94,6 +116,10 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
     workdir: opts.cwd,
     timeoutMs: opts.timeoutMs,
     stdoutMaxBytes: opts.capBytes,
+    // This is deliberately not a DSH_* name because the subprocess seam strips
+    // inherited DSH_* variables. Child code uses it only to replace nested pipe
+    // capture with regular files inside the sandbox-private TEMP directory.
+    env: { PLANX_SANDBOX_VALIDATION: '1' },
     sandboxPolicy,
   })
   const result = await shell.run(spec)
@@ -107,6 +133,7 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
   const sandbox = sandboxFacts(result?.sandbox)
   const sandboxIncomplete = !sandboxEnforcementAccepted(sandbox)
   const sandboxDenied = Boolean(sandbox?.denied)
+  const diagnostic = validationInfrastructureDiagnostic(process.platform, sandbox, exitCode, stdout, stderr)
 
   const validationDir = join(opts.runDir, 'validation')
   await mkdir(validationDir, { recursive: true })
@@ -122,7 +149,7 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
   const mutated = snapshotHash(before) !== snapshotHash(after)
   const status = sandboxDenied || mutated
     ? 'UNSAFE_MUTATION'
-    : sandboxIncomplete || stdoutTruncated || stderrTruncated || timedOut || aborted
+    : sandboxIncomplete || diagnostic !== undefined || stdoutTruncated || stderrTruncated || timedOut || aborted
       ? 'INCONCLUSIVE'
       : exitCode === 0
         ? 'PASS'
@@ -139,6 +166,7 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
     timeoutMs: opts.timeoutMs,
     exitCode: timedOut || aborted ? null : exitCode,
     status,
+    ...(diagnostic ? { diagnostic } : {}),
     stdout: {
       path: stdoutPath,
       sha256: hashBytes(stdout),
@@ -154,6 +182,6 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
     ...(sandbox ? { sandbox } : {}),
     boundHead: head,
     ownershipFingerprint: opts.ownershipFingerprint ?? snapshotHash(after),
-    complete: !sandboxIncomplete && !sandboxDenied && !timedOut && !aborted && !stdoutTruncated && !stderrTruncated,
+    complete: !sandboxIncomplete && !sandboxDenied && diagnostic === undefined && !timedOut && !aborted && !stdoutTruncated && !stderrTruncated,
   }
 }

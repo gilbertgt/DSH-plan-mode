@@ -252,7 +252,7 @@ async function validateIsolated(
       receipts.push(receipt)
       await atomicJson(join(runDir, 'validation', `${phase.toLowerCase()}-${command.id}.receipt.json`), receipt)
       emit?.('validation', { runId, commandId: command.id, status: receipt.status })
-      if (receipt.status !== 'PASS') throw new Error(`${phase.toLowerCase()} validation ${command.id}: ${receipt.status}`)
+      if (receipt.status !== 'PASS') throw new Error(`${phase.toLowerCase()} validation ${command.id}: ${receipt.status}${receipt.diagnostic ? ` (${receipt.diagnostic})` : ''}`)
     }
     await assertTrustedReceipts(receipts, head, fingerprint)
     clean = true

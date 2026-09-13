@@ -1,10 +1,9 @@
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { changedPaths, fullHead, git, repoRoot } from '../git/repository.ts'
-const exec=promisify(execFile)
-export async function ghRaw(cwd:string,args:string[]){const r=await exec('gh',args,{cwd,encoding:'utf8',windowsHide:true,maxBuffer:8*1024*1024});return String(r.stdout??'')}
+import { execFileCaptured } from '../platform/captured-exec.ts'
+
+export async function ghRaw(cwd:string,args:string[]){const r=await execFileCaptured('gh',args,{cwd,maxBuffer:8*1024*1024});return r.stdout.toString('utf8')}
 export async function gh(cwd:string,args:string[]){const raw=await ghRaw(cwd,args);return JSON.parse(raw||'null')}
-export async function ghRepository(cwd:string){await exec('gh',['auth','status'],{cwd,encoding:'utf8',windowsHide:true});return gh(cwd,['repo','view','--json','nameWithOwner,defaultBranchRef'])}
+export async function ghRepository(cwd:string){await execFileCaptured('gh',['auth','status'],{cwd,maxBuffer:8*1024*1024});return gh(cwd,['repo','view','--json','nameWithOwner,defaultBranchRef'])}
 export async function ghPreflight(cwd:string,repository:string){const actual=await ghRepository(cwd);if(actual?.nameWithOwner!==repository)throw new Error(`repository mismatch: ${actual?.nameWithOwner} != ${repository}`);return actual}
 export async function fetchIssue(cwd:string,issue:number){return gh(cwd,['issue','view',String(issue),'--json','number,state,url,body,author,comments'])}
 
