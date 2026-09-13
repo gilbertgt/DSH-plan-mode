@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ParsedValidationCommand } from '../contract/plan-artifact.ts'
 import { snapshotDirty, snapshotHash } from '../git/fingerprints.ts'
@@ -19,6 +19,52 @@ export function configureValidationShell(shell: any): () => void {
 
 function safe(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 160)
+}
+
+function gitConfigQuotedPath(value: string): string {
+  // Git config accepts forward-slash Windows paths. Quoting keeps whitespace,
+  // '#' and ';' literal without depending on shell escaping rules.
+  return `"${value.replaceAll('\\', '/').replaceAll('"', '\\"')}"`
+}
+
+export interface PreparedValidationEnvironment {
+  env: Record<string, string>
+  cleanup: () => Promise<void>
+  gitConfigPath?: string
+}
+
+/**
+ * Prepare environment inherited by an authoritative validation subprocess.
+ *
+ * Git ownership is evaluated as the restricted Windows token, not as the Host
+ * user that created the detached validation worktree. Older Git releases only
+ * honor safe.directory from protected system/global config, so do not rely on
+ * `git -c safe.directory=...`. Instead point this subprocess at a short-lived,
+ * isolated global config containing exactly the canonical validation worktree.
+ * The user's real global Git config is never mutated and no wildcard is used.
+ */
+export async function prepareValidationSubprocessEnvironment(
+  cwd: string,
+  validationDir: string,
+  prefix: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<PreparedValidationEnvironment> {
+  const env: Record<string, string> = { PLANX_SANDBOX_VALIDATION: '1' }
+  if (platform !== 'win32') return { env, cleanup: async () => {} }
+
+  const canonicalCwd = await realpath(cwd)
+  const configDir = await mkdtemp(join(validationDir, `${prefix}-git-`))
+  const gitConfigPath = join(configDir, 'config')
+  await writeFile(
+    gitConfigPath,
+    `[safe]\n\tdirectory = ${gitConfigQuotedPath(canonicalCwd)}\n`,
+    { encoding: 'utf8', flag: 'wx' },
+  )
+  return {
+    env: { ...env, GIT_CONFIG_GLOBAL: gitConfigPath },
+    gitConfigPath,
+    cleanup: async () => { await rm(configDir, { recursive: true, force: true }).catch(() => {}) },
+  }
 }
 
 async function assertExistingPackageScript(cwd: string, parsed: ParsedValidationCommand): Promise<void> {
@@ -111,18 +157,27 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
     workspaceRoot: opts.cwd,
     ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
   }
-  const spec = shell.resolve({
-    command: executableCommand,
-    workdir: opts.cwd,
-    timeoutMs: opts.timeoutMs,
-    stdoutMaxBytes: opts.capBytes,
-    // This is deliberately not a DSH_* name because the subprocess seam strips
-    // inherited DSH_* variables. Child code uses it only to replace nested pipe
-    // capture with regular files inside the sandbox-private TEMP directory.
-    env: { PLANX_SANDBOX_VALIDATION: '1' },
-    sandboxPolicy,
-  })
-  const result = await shell.run(spec)
+  const validationDir = join(opts.runDir, 'validation')
+  await mkdir(validationDir, { recursive: true })
+  const prefix = `${safe(opts.phase)}-${safe(opts.runId)}-${safe(opts.commandId)}`
+  const preparedEnvironment = await prepareValidationSubprocessEnvironment(opts.cwd, validationDir, prefix)
+  let result: any
+  try {
+    const spec = shell.resolve({
+      command: executableCommand,
+      workdir: opts.cwd,
+      timeoutMs: opts.timeoutMs,
+      stdoutMaxBytes: opts.capBytes,
+      // DSH_* variables are stripped by the subprocess seam. The marker selects
+      // file-backed nested stdio; GIT_CONFIG_GLOBAL scopes exact safe.directory
+      // trust to this validation subprocess without modifying ~/.gitconfig.
+      env: preparedEnvironment.env,
+      sandboxPolicy,
+    })
+    result = await shell.run(spec)
+  } finally {
+    await preparedEnvironment.cleanup()
+  }
   const stdout = Buffer.from(String(result?.stdout?.text ?? ''), 'utf8')
   const stderr = Buffer.from(String(result?.stderr?.text ?? ''), 'utf8')
   const stdoutTruncated = Boolean(result?.stdout?.truncated)
@@ -135,9 +190,6 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
   const sandboxDenied = Boolean(sandbox?.denied)
   const diagnostic = validationInfrastructureDiagnostic(process.platform, sandbox, exitCode, stdout, stderr)
 
-  const validationDir = join(opts.runDir, 'validation')
-  await mkdir(validationDir, { recursive: true })
-  const prefix = `${safe(opts.phase)}-${safe(opts.runId)}-${safe(opts.commandId)}`
   const stdoutPath = join(validationDir, `${prefix}.stdout.log`)
   const stderrPath = join(validationDir, `${prefix}.stderr.log`)
   await Promise.all([
