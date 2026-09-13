@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { copyFile, lstat, mkdir, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ParsedValidationCommand } from '../contract/plan-artifact.ts'
 
@@ -80,7 +80,6 @@ async function copyTreeCollectingLinks(
   source: string,
   destination: string,
   sourceRoot: string,
-  destinationRoot: string,
   links: LinkRecord[],
 ): Promise<void> {
   const sourceStat = await lstat(source)
@@ -103,13 +102,14 @@ async function copyTreeCollectingLinks(
   if (sourceStat.isDirectory()) {
     await mkdir(destination, { recursive: true })
     for (const entry of await readdir(source, { withFileTypes: true })) {
-      await copyTreeCollectingLinks(join(source, entry.name), join(destination, entry.name), sourceRoot, destinationRoot, links)
+      await copyTreeCollectingLinks(join(source, entry.name), join(destination, entry.name), sourceRoot, links)
     }
     return
   }
   if (sourceStat.isFile()) {
     await mkdir(dirname(destination), { recursive: true })
     await copyFile(source, destination)
+    if (process.platform !== 'win32') await chmod(destination, sourceStat.mode & 0o777)
     return
   }
   throw new Error(`validation dependency tree contains unsupported filesystem entry: ${source}`)
@@ -176,7 +176,7 @@ export async function materializeValidationDependencies(opts: MaterializeValidat
 
   const links: LinkRecord[] = []
   try {
-    await copyTreeCollectingLinks(sourceModules, destinationModules, sourceRoot, cwd, links)
+    await copyTreeCollectingLinks(sourceModules, destinationModules, sourceRoot, links)
     await createMappedLinks(links, cwd)
     const marker: DependencyMarker = {
       schemaVersion: 1,
