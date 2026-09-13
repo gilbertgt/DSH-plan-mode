@@ -1,2 +1,21 @@
 import type { PlanArtifact, PlanTask } from '../contract/plan-artifact.ts'
-export function buildTaskPacket(plan:PlanArtifact,task:PlanTask,dependencyHandoff:string[]=[]){return [`Role: Worker`,`Task ID: ${task.id}`,`Objective: ${task.objective}`,`Global Decision Locks:\n${plan.decisionLocks.map(x=>`- ${x}`).join('\n')||'- none'}`,`Task Decision Locks:\n${task.decisionLocks.map(x=>`- ${x}`).join('\n')||'- none'}`,`Prioritized read targets (start here; expand only for a concrete blocker):\n${task.read.map(x=>`- ${x}`).join('\n')||'- none'}`,`Exact modify ownership (MUST NOT mutate outside):\n${task.modify.map(x=>`- ${x}`).join('\n')}`,`Required changes:\n${task.requiredChanges.map(x=>`- ${x}`).join('\n')}`,`Acceptance criteria:\n${task.acceptanceCriteria.map(x=>`- ${x}`).join('\n')}`,`Validation requested:\n${task.validation.map(x=>`- ${x}`).join('\n')||'- host validation follows'}`,`Dependency handoff:\n${dependencyHandoff.map(x=>`- ${x}`).join('\n')||'- none'}`,`Execution policy: you are a leaf Worker. Do not spawn/delegate to subagents, background agents, workflows, or agent-control tools. Perform the assigned implementation yourself. Host validation is authoritative; do not delegate validation to another agent.`,`Context expansion: if you need files outside initial read targets, record a concrete blocker and expansion reason. Do not read the Planner conversation.`,`Return only the configured structured completion contract.`].join('\n\n')}
+
+export function buildTaskPacket(plan:PlanArtifact,task:PlanTask,dependencyHandoff:string[]=[]){
+  return [
+    `Role: Worker`,
+    `Task ID: ${task.id}`,
+    `Objective: ${task.objective}`,
+    `Global Decision Locks:\n${plan.decisionLocks.map(x=>`- ${x}`).join('\n')||'- none'}`,
+    `Task Decision Locks:\n${task.decisionLocks.map(x=>`- ${x}`).join('\n')||'- none'}`,
+    `Prioritized read targets (start here; expand only for a concrete blocker):\n${task.read.map(x=>`- ${x}`).join('\n')||'- none'}`,
+    `Exact modify ownership (MUST NOT mutate outside):\n${task.modify.map(x=>`- ${x}`).join('\n')}`,
+    `Required changes:\n${task.requiredChanges.map(x=>`- ${x}`).join('\n')}`,
+    `Acceptance criteria:\n${task.acceptanceCriteria.map(x=>`- ${x}`).join('\n')}`,
+    `Validation requested:\n${task.validation.map(x=>`- ${x}`).join('\n')||'- host validation follows'}`,
+    `Dependency handoff:\n${dependencyHandoff.map(x=>`- ${x}`).join('\n')||'- none'}`,
+    `Execution policy: you are a leaf Worker. Do not spawn/delegate to subagents, background agents, workflows, or agent-control tools. Perform the assigned implementation yourself. Host validation is authoritative; do not delegate validation to another agent.`,
+    `Host Git context is authoritative: the Plan Orchestrator has already established the repository/worktree binding and baseline HEAD before this Worker starts. Do not inspect or resolve .git internals, and do not re-check branch, HEAD, status, worktree metadata, or repository identity merely to reconfirm execution context. Start from the prioritized read targets and implement the assigned change.`,
+    `Context expansion: if you need files outside initial read targets, record a concrete blocker and expansion reason. Do not read the Planner conversation.`,
+    `Return only the configured structured completion contract.`,
+  ].join('\n\n')
+}
