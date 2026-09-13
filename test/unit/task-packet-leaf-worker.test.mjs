@@ -25,3 +25,12 @@ test('worker packet explicitly forbids nested/background delegation and reserves
   assert.match(packet, /Host validation is authoritative/i)
   assert.match(packet, /do not delegate validation to another agent/i)
 })
+
+test('worker packet treats Git baseline discovery as host-owned context instead of worker research', () => {
+  const packet = buildTaskPacket(plan, task)
+  assert.match(packet, /Host Git context is authoritative/i)
+  assert.match(packet, /already established the repository\/worktree binding and baseline HEAD/i)
+  assert.match(packet, /Do not inspect or resolve \.git internals/i)
+  assert.match(packet, /do not re-check branch, HEAD, status, worktree metadata, or repository identity/i)
+  assert.match(packet, /Start from the prioritized read targets and implement the assigned change/i)
+})
