@@ -99,8 +99,29 @@ jobs:
           const expectedTag = assertReleaseRef(pkg.version, 'tag', process.env.RELEASE_TAG)
           console.log(`manual release source OK (${pkg.name}@${pkg.version}, ${expectedTag})`)
           NODE
-      - name: Build and verify exact tarball
+      - name: Build and verify exact tarball for normal tag push
+        if: ${{ github.event_name != 'workflow_dispatch' }}
         run: npm run release:pack
+      - name: Build and verify exact tarball for manual recovery
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_SHA="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+
+          # Older release tags contain a source verifier that only understands a
+          # tag-push event at the then-current main tip. The workflow-level manual
+          # recovery gate above has already verified the exact tag, package/lock
+          # metadata, clean tree, current dispatch main, and main ancestry.
+          # Disable only that legacy redundant gate for the pack subprocess while
+          # recording the real tag identity in the release manifest.
+          env -u GITHUB_ACTIONS \
+            RELEASE_STRICT=0 \
+            GITHUB_SHA="$TAG_SHA" \
+            GITHUB_REF="refs/tags/${RELEASE_TAG}" \
+            GITHUB_REF_TYPE="tag" \
+            GITHUB_REF_NAME="${RELEASE_TAG}" \
+            npm run release:pack
       - name: DSH rc.1 exact-artifact E2E
         shell: bash
         env:
@@ -153,6 +174,7 @@ jobs:
 # - Normal tag pushes keep the strict rule that the tag commit must equal the current origin/main tip.
 # - workflow_dispatch is a recovery path for an existing release tag when the original tag push did not trigger this workflow.
 # - Manual recovery verification lives in this workflow (not only in the tagged source), so older tags created before the recovery code existed can still be verified safely.
+# - After workflow-level manual verification succeeds, legacy tagged release-pack code runs with only its obsolete event-shape gate disabled; the manifest is still stamped with the exact requested tag SHA/ref.
 # - Manual recovery must be launched from current main, checks out the exact requested tag, requires that tag to match package.json/lock metadata, and requires the tag commit to be contained in origin/main.
 # - Leave repository variable NPM_STAGE_ENABLED unset/false until npm Trusted Publishing is configured for release.yml.
 # - With NPM_STAGE_ENABLED=true, the stage job receives OIDC permission only after verify succeeds and never rebuilds/re-packs.
