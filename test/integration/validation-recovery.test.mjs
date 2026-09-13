@@ -38,6 +38,7 @@ test('sandboxed host validation distinguishes pass/fail/unsafe mutation/timeout 
   try{
     const pass=await validation(d,runDir,'pass')
     assert.equal(pass.status,'PASS');assert.equal(pass.complete,true);assert.equal(pass.exitCode,0)
+    assert.deepEqual(pass.sandbox,{mode:'workspace-write',denied:false,enforcement:'full',runnerFailed:false})
     await assertTrustedReceipts([pass],await fullHead(d),pass.ownershipFingerprint)
     await writeFile(pass.stdout.path,'tampered')
     const currentHead=await fullHead(d)
@@ -55,15 +56,31 @@ test('sandboxed host validation distinguishes pass/fail/unsafe mutation/timeout 
   }finally{await rm(d,{recursive:true,force:true});await rm(runDir,{recursive:true,force:true})}
 })
 
-test('validation fails closed on missing/degraded sandbox and truncated output',async()=>{
+test('validation accepts supported Windows partial enforcement and fails closed elsewhere',async()=>{
   const d=await repo(),runDir=await mkdtemp(join(tmpdir(),'planx-cap-'))
   try{
     const truncated=await validation(d,runDir,'cap',fakeShell(async()=>shellResult({stdout:{text:'tail',truncated:true}})))
     assert.equal(truncated.status,'INCONCLUSIVE');assert.equal(truncated.stdout.truncated,true)
+
     const noSandbox=await validation(d,runDir,'nosandbox',fakeShell(async()=>{const x=shellResult();delete x.sandbox;return x}))
-    assert.equal(noSandbox.status,'INCONCLUSIVE');assert.equal(noSandbox.complete,false)
-    const partial=await validation(d,runDir,'partial',fakeShell(async()=>shellResult({sandbox:{mode:'workspace-write',denied:false,enforcement:'partial',runnerFailed:false}})))
-    assert.equal(partial.status,'INCONCLUSIVE')
+    assert.equal(noSandbox.status,'INCONCLUSIVE');assert.equal(noSandbox.complete,false);assert.equal(noSandbox.sandbox,undefined)
+
+    const partialFacts={mode:'workspace-write',denied:false,enforcement:'partial',runnerFailed:false}
+    const partial=await validation(d,runDir,'partial',fakeShell(async()=>shellResult({sandbox:partialFacts})))
+    assert.deepEqual(partial.sandbox,partialFacts)
+    assert.equal(partial.status,process.platform==='win32'?'PASS':'INCONCLUSIVE')
+    assert.equal(partial.complete,process.platform==='win32')
+
+    const partialFail=await validation(d,runDir,'partial-fail',fakeShell(async()=>shellResult({exitCode:3,sandbox:partialFacts})))
+    assert.equal(partialFail.status,process.platform==='win32'?'FAIL':'INCONCLUSIVE')
+
+    const partialDenied=await validation(d,runDir,'partial-denied',fakeShell(async()=>shellResult({exitCode:1,sandbox:{...partialFacts,denied:true}})))
+    assert.equal(partialDenied.status,'UNSAFE_MUTATION')
+
+    const runnerFailed=await validation(d,runDir,'runner-failed',fakeShell(async()=>shellResult({sandbox:{...partialFacts,runnerFailed:true}})))
+    assert.equal(runnerFailed.status,'INCONCLUSIVE');assert.equal(runnerFailed.complete,false)
+    assert.equal(runnerFailed.sandbox.runnerFailed,true)
+
     const denied=await validation(d,runDir,'denied',fakeShell(async()=>shellResult({exitCode:1,sandbox:{mode:'workspace-write',denied:true,enforcement:'full',runnerFailed:false}})))
     assert.equal(denied.status,'UNSAFE_MUTATION')
   }finally{await rm(d,{recursive:true,force:true});await rm(runDir,{recursive:true,force:true})}
