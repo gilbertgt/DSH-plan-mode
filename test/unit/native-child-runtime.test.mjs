@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { resolve } from 'node:path'
+import { NativeSpawnBackend } from '../../src/orchestration/native-backend.ts'
 import {
   installNativeChildRuntimeGuard,
   nativeChildRuntimeGuardReason,
@@ -51,4 +52,57 @@ test('installed runtime guard applies only to the exact direct Plan child and re
 test('runtime guard fails closed when guard or parent session APIs are unavailable', () => {
   assert.throws(() => installNativeChildRuntimeGuard({ tools: {} }, { session: { id: 'parent' } }, process.cwd()), /tools\.guard unavailable/)
   assert.throws(() => installNativeChildRuntimeGuard({ tools: { guard() {} } }, {}, process.cwd()), /parent session unavailable/)
+})
+
+test('NativeSpawnBackend installs the runtime fence before starting a mutating Worker', async () => {
+  const root = resolve(process.cwd(), 'plan-root')
+  const guards = []
+  let releases = 0
+  let started = false
+  const ctx = {
+    on() { return () => {} },
+    tools: {
+      guard(fn) { guards.push(fn); return () => { releases++ } },
+      schemas() { return [{ name: 'read' }, { name: 'write' }] },
+    },
+    subagents: {
+      async start(provider, request) {
+        assert.equal(provider, 'spawn')
+        assert.equal(guards.length, 2)
+        const child = agent(root)
+        assert.ok(guards.some(guard => /leaf-role policy/.test(String(guard({ agent: child, name: 'subagent', arguments: {} }) ?? ''))))
+        assert.ok(guards.some(guard => /worktree binding violation/.test(String(guard({ agent: agent(resolve(root, '..', 'wrong')), name: 'read', arguments: {} }) ?? ''))))
+        started = true
+        return {
+          localAgent: undefined,
+          result: Promise.resolve({
+            stopReason: 'completed',
+            structured: {
+              taskId: 'task',
+              status: 'COMPLETE',
+              changed: [],
+              validation: [],
+              remaining: [],
+              contextExpansion: [],
+            },
+          }),
+          async dispose() {},
+        }
+      },
+    },
+  }
+  const parent = { session: { id: 'parent', header: { cwd: root } } }
+  const result = await new NativeSpawnBackend(ctx).run({
+    parent,
+    role: 'worker',
+    taskId: 'task',
+    prompt: 'do work',
+    route: { provider: 'p', model: 'm' },
+    signal: new AbortController().signal,
+    ownership: { root, paths: ['src/a.ts'] },
+  })
+
+  assert.equal(started, true)
+  assert.equal(result.status, 'COMPLETE')
+  assert.equal(releases, 2)
 })
