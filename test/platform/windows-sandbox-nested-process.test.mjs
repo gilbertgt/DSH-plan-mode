@@ -4,8 +4,15 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { needsFileBackedWindowsStdio } from '../../src/platform/captured-exec.ts'
 
-test('Windows ACL sandbox can capture a nested child through file-backed stdio', { skip: process.platform !== 'win32' }, async () => {
+const liveSkip = process.platform !== 'win32'
+  ? 'Windows-only host behavior'
+  : needsFileBackedWindowsStdio()
+    ? 'authoritative validation already runs inside the DSH Windows ACL sandbox'
+    : false
+
+test('Windows ACL sandbox can capture a nested child through file-backed stdio', { skip: liveSkip }, async () => {
   const { AclSandbox, tempWriteSid, workspaceWriteSid } = await import('@deepseek-ai/dsh-sandbox-windows-acl')
   const workspace = await mkdtemp(join(tmpdir(), 'planx-acl-workspace-'))
   const privateTemp = await mkdtemp(join(tmpdir(), 'planx-acl-temp-'))
