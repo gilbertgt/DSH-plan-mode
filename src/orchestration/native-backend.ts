@@ -17,19 +17,22 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * Resolve the conservative ownership-safe policy against the host's actual
- * global tool catalog. DSH rejects unknown names in tools.restrict(), so aliases
- * that are not registered in the active profile must never reach toolFilter.
+ * Resolve the conservative ownership-safe policy against the delegating
+ * parent's effective DSH capability catalog. Preset deployments may keep every
+ * model-facing tool on the parent agent's scope chain while the global catalog
+ * is empty, and the spawned child joins that parent composition before DSH
+ * applies its per-child toolFilter.
  */
-export function resolveOwnershipSafeToolAllow(ctx: any): string[] {
+export function resolveOwnershipSafeToolAllow(ctx: any, parent: any): string[] {
   const schemas = ctx?.tools?.schemas
   if (typeof schemas !== 'function') throw new Error('tools.schemas unavailable for ownership-safe tool filtering')
+  if (!parent) throw new Error('parent agent unavailable for ownership-safe tool filtering')
 
   let catalog: unknown
   try {
-    // Omitted scope intentionally asks DSH for the global view, matching the
-    // namespace that ToolRestriction allow-lists are permitted to name.
-    catalog = schemas.call(ctx.tools)
+    // DSH's agent-scoped schema view is the authoritative capability catalog
+    // for tools the delegated child can inherit from this parent composition.
+    catalog = schemas.call(ctx.tools, parent)
   } catch (error) {
     throw new Error(`tools.schemas failed for ownership-safe tool filtering: ${errorMessage(error)}`)
   }
@@ -43,7 +46,7 @@ export function resolveOwnershipSafeToolAllow(ctx: any): string[] {
   }
 
   const allow = OWNERSHIP_SAFE_MUTATION_TOOLS.filter(name => registered.has(name))
-  if (allow.length === 0) throw new Error('no ownership-safe global tools are registered in the active DSH profile')
+  if (allow.length === 0) throw new Error('no ownership-safe tools are available in the parent DSH profile')
   return [...allow]
 }
 
@@ -59,7 +62,7 @@ export class NativeSpawnBackend{
       const signal=req.ownership?withRoleTimeout(cwd,req.signal):req.signal
       // A mutating native role never receives shell/pwsh/run-code. Every exposed
       // mutation surface is one the ownership guard understands before execute.
-      const toolFilter=req.ownership?{allow:resolveOwnershipSafeToolAllow(this.ctx)}:req.toolFilter
+      const toolFilter=req.ownership?{allow:resolveOwnershipSafeToolAllow(this.ctx,req.parent)}:req.toolFilter
       run=await this.ctx.subagents.start('spawn',{
         label:`${req.role}:${req.taskId}`,
         prompt:[{type:'text',text:req.prompt}],
