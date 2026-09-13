@@ -1,5 +1,9 @@
 # Overlay for worktree-isolated SDK Workers. The sdk profile already composes
-# dsh-base; this file only tightens the per-session filesystem policy.
+# dsh-base; this file tightens filesystem policy and makes the Worker a leaf.
 - id: sandbox-policy
   config:
     mode: workspace-write
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
