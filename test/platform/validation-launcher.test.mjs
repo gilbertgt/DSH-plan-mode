@@ -111,8 +111,11 @@ test(`a resolved Windows launcher reaches the real npm under ${shellLabel}'s Exe
     try { await runInPowerShell('npm run launcher-probe', d) }
     catch (error) { unsuffixedBlocked = /PSSecurityException|running scripts is disabled|cannot be loaded/i.test(errorText(error)) }
     if (unsuffixedBlocked) {
-      // `runInPowerShell` is async, so the rejection is asserted with
-      // `assert.rejects`; `assert.throws` cannot observe a rejected promise.
+      // `runInPowerShell` is async, so its failure arrives as a rejected
+      // promise. `assert.throws` cannot observe that: handed an async thunk it
+      // raises `ERR_ASSERTION: Missing expected exception` while the rejection
+      // escapes as an unhandled rejection. `assert.rejects` is the tool that
+      // actually matches the diagnostic.
       await assert.rejects(() => runInPowerShell('npm run launcher-probe', d), /PSSecurityException|running scripts is disabled|cannot be loaded/i)
       assert.match(await runInPowerShell(executableCommand, d), /LAUNCHER-OK/)
     }
