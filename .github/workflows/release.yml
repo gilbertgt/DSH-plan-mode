@@ -45,8 +45,60 @@ jobs:
         run: npm run compat:check
         env:
           DSH_VERSION_UNDER_TEST: 0.1.5-rc.1
-      - name: Verify release source
+      - name: Verify release source for normal tag push
+        if: ${{ github.event_name != 'workflow_dispatch' }}
         run: npm run release:source
+      - name: Verify release source for manual recovery
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_REPOSITORY" != "gilbertgt/DSH-plan-mode" ]; then
+            echo "release blocked: unexpected repository $GITHUB_REPOSITORY" >&2
+            exit 1
+          fi
+
+          git fetch --force origin main --tags
+
+          HEAD_SHA="$(git rev-parse HEAD)"
+          TAG_SHA="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          MAIN_SHA="$(git rev-parse origin/main)"
+
+          if [ "$HEAD_SHA" != "$TAG_SHA" ]; then
+            echo "release blocked: checkout HEAD $HEAD_SHA != ${RELEASE_TAG} commit $TAG_SHA" >&2
+            exit 1
+          fi
+
+          if [ "$GITHUB_SHA" != "$MAIN_SHA" ]; then
+            echo "release blocked: manual release dispatch must run from current main $MAIN_SHA, got $GITHUB_SHA" >&2
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$HEAD_SHA" "$MAIN_SHA"; then
+            echo "release blocked: tag commit $HEAD_SHA is not contained in current origin/main $MAIN_SHA" >&2
+            exit 1
+          fi
+
+          if [ -n "$(git status --porcelain=v1 --untracked-files=normal)" ]; then
+            echo "release blocked: working tree is not clean" >&2
+            git status --porcelain=v1 --untracked-files=normal >&2
+            exit 1
+          fi
+
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs'
+          import {
+            assertLockMetadata,
+            assertPackageMetadata,
+            assertReleaseRef,
+          } from './scripts/release-policy.mjs'
+
+          const pkg = assertPackageMetadata(JSON.parse(readFileSync('package.json', 'utf8')))
+          assertLockMetadata(pkg, JSON.parse(readFileSync('package-lock.json', 'utf8')))
+          const expectedTag = assertReleaseRef(pkg.version, 'tag', process.env.RELEASE_TAG)
+          console.log(`manual release source OK (${pkg.name}@${pkg.version}, ${expectedTag})`)
+          NODE
       - name: Build and verify exact tarball
         run: npm run release:pack
       - name: DSH rc.1 exact-artifact E2E
@@ -100,7 +152,8 @@ jobs:
 # Release behavior:
 # - Normal tag pushes keep the strict rule that the tag commit must equal the current origin/main tip.
 # - workflow_dispatch is a recovery path for an existing release tag when the original tag push did not trigger this workflow.
-# - Manual recovery must be launched from current main, checks out the exact requested tag, requires that tag to match package.json, and requires the tag commit to be contained in origin/main.
+# - Manual recovery verification lives in this workflow (not only in the tagged source), so older tags created before the recovery code existed can still be verified safely.
+# - Manual recovery must be launched from current main, checks out the exact requested tag, requires that tag to match package.json/lock metadata, and requires the tag commit to be contained in origin/main.
 # - Leave repository variable NPM_STAGE_ENABLED unset/false until npm Trusted Publishing is configured for release.yml.
 # - With NPM_STAGE_ENABLED=true, the stage job receives OIDC permission only after verify succeeds and never rebuilds/re-packs.
 # - This workflow never falls back to direct `npm publish`.
