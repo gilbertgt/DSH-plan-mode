@@ -4,9 +4,18 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to verify/stage (for example v1.0.1)
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
 concurrency:
-  group: npm-release-${{ github.ref }}
+  group: npm-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -19,6 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -51,7 +61,7 @@ jobs:
       - name: Upload verified release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: npm-release-${{ github.ref_name }}
+          name: npm-release-${{ env.RELEASE_TAG }}
           path: |
             .artifacts/*.tgz
             .artifacts/release-manifest.json
@@ -76,7 +86,7 @@ jobs:
       - name: Download exact verified artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: npm-release-${{ github.ref_name }}
+          name: npm-release-${{ env.RELEASE_TAG }}
           path: .artifacts
       - name: Install staged-publishing npm CLI
         run: npm install --global npm@11.19.1 --ignore-scripts --no-audit --no-fund
@@ -87,11 +97,10 @@ jobs:
           node -e "const fs=require('fs'),c=require('crypto');const m=JSON.parse(fs.readFileSync('.artifacts/release-manifest.json','utf8'));const h=c.createHash('sha256').update(fs.readFileSync('.artifacts/'+m.tarball)).digest('hex');if(h!==m.sha256)throw new Error('downloaded release tarball digest mismatch')"
           npm stage publish "$TARBALL" --access public
 
-# Bootstrap behavior:
-# - Leave repository variable NPM_STAGE_ENABLED unset/false for the first npm release.
-# - The verify job then tests and uploads the exact .tgz but never receives OIDC publish permission.
-# - Publish that one verified tarball manually with maintainer 2FA.
-# - Configure npm Trusted Publishing for release.yml with stage-only permission,
-#   then set NPM_STAGE_ENABLED=true for future tags.
-# - The stage job receives OIDC permission only after verify succeeds and never rebuilds/re-packs.
+# Release behavior:
+# - Normal tag pushes keep the strict rule that the tag commit must equal the current origin/main tip.
+# - workflow_dispatch is a recovery path for an existing release tag when the original tag push did not trigger this workflow.
+# - Manual recovery must be launched from current main, checks out the exact requested tag, requires that tag to match package.json, and requires the tag commit to be contained in origin/main.
+# - Leave repository variable NPM_STAGE_ENABLED unset/false until npm Trusted Publishing is configured for release.yml.
+# - With NPM_STAGE_ENABLED=true, the stage job receives OIDC permission only after verify succeeds and never rebuilds/re-packs.
 # - This workflow never falls back to direct `npm publish`.
