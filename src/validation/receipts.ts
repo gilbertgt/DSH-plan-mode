@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 export type ValidationStatus = 'PASS'|'FAIL'|'INCONCLUSIVE'|'UNSAFE_MUTATION'
+export type ValidationDiagnostic = 'WINDOWS_SANDBOX_NESTED_PIPE_EPERM'
 export interface ValidationSandboxFacts {
   mode?: string
   denied: boolean
@@ -18,6 +19,7 @@ export interface ValidationReceipt {
   timeoutMs: number
   exitCode: number | null
   status: ValidationStatus
+  diagnostic?: ValidationDiagnostic
   stdout: { path: string; sha256: string; bytes: number; truncated: boolean }
   stderr: { path: string; sha256: string; bytes: number; truncated: boolean }
   sandbox?: ValidationSandboxFacts
