@@ -11,7 +11,7 @@ const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 async function writeExecutableTool(binDir) {
   await mkdir(binDir, { recursive: true })
   if (process.platform === 'win32') {
-    await writeFile(join(binDir, 'fixture-tool.cmd'), '@echo off\r\nnode -e "console.log(\"TOOLCHAIN-OK\")"\r\n')
+    await writeFile(join(binDir, 'fixture-tool.cmd'), '@echo off\r\nnode -e "console.log(\'TOOLCHAIN-OK\')"\r\n')
   } else {
     const tool = join(binDir, 'fixture-tool')
     await writeFile(tool, '#!/bin/sh\necho TOOLCHAIN-OK\n')
