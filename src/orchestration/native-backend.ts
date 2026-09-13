@@ -3,6 +3,7 @@ import { ROLE_RESULT_SCHEMA, validateRoleResult, type RoleResult } from '../cont
 import { usageFromSession, type UsageSample } from '../telemetry/usage.ts'
 import { withRoleTimeout } from '../runtime-policy.ts'
 import { installChildOwnershipGuard } from './ownership-guard.ts'
+import { installNativeChildRuntimeGuard } from './native-child-runtime.ts'
 import { installNativeMutatingChildSandbox } from './native-child-policy.ts'
 export type RoleExecutionResult=RoleResult&{__usage?:UsageSample}
 export interface NativeRunRequest{parent:any;role:'worker'|'integrator'|'reviewer';taskId:string;prompt:string;route:RouteChoice;signal:AbortSignal;persona?:string;toolFilter?:unknown;ownership?:{root:string;paths:string[]}}
@@ -57,10 +58,17 @@ export class NativeSpawnBackend{
   async run(req:NativeRunRequest):Promise<RoleExecutionResult>{
     const started=Date.now()
     const sandboxScope=req.ownership?installNativeMutatingChildSandbox(this.ctx):undefined
+    let releaseRuntime=()=>{}
     let releaseOwnership=()=>{}
     let run:any
     try{
-      if(req.ownership)releaseOwnership=installChildOwnershipGuard(this.ctx,req.parent,req.ownership.root,req.ownership.paths)
+      if(req.ownership){
+        // Runtime fencing is independent of the ordinary tool allow-list. It
+        // protects dynamic/scoped delegation tools that may appear after child
+        // creation and verifies every tool executes in the exact Plan worktree.
+        releaseRuntime=installNativeChildRuntimeGuard(this.ctx,req.parent,req.ownership.root)
+        releaseOwnership=installChildOwnershipGuard(this.ctx,req.parent,req.ownership.root,req.ownership.paths)
+      }
       const cwd=req.parent?.session?.header?.cwd
       const signal=req.ownership?withRoleTimeout(cwd,req.signal):req.signal
       // A mutating native role never receives shell/pwsh/run-code. Every exposed
@@ -91,7 +99,9 @@ export class NativeSpawnBackend{
       return{...valid,__usage:usage}
     }finally{
       try{if(run)await run.dispose()}finally{
-        try{releaseOwnership()}finally{sandboxScope?.dispose()}
+        try{releaseOwnership()}finally{
+          try{releaseRuntime()}finally{sandboxScope?.dispose()}
+        }
       }
     }
   }
