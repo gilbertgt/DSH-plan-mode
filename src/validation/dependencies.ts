@@ -68,6 +68,24 @@ async function dependencyInputs(root: string, manager: ParsedValidationCommand['
   return { lockfile: selected, inputsSha256: sha256(pkg, Buffer.from(`\0${selected}\0`), lock) }
 }
 
+async function isFile(path: string): Promise<boolean> {
+  try { return (await lstat(path)).isFile() }
+  catch { return false }
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  try { return (await lstat(path)).isDirectory() }
+  catch { return false }
+}
+
+/** Yarn zero-install PnP is already self-contained in the detached worktree:
+ * the loader plus project-local cache are versioned dependency artifacts, so
+ * creating a synthetic node_modules tree would be both unnecessary and wrong. */
+async function yarnPnpReady(root: string): Promise<boolean> {
+  const loader = await isFile(join(root, '.pnp.cjs')) || await isFile(join(root, '.pnp.loader.mjs'))
+  return loader && await isDirectory(join(root, '.yarn', 'cache'))
+}
+
 async function sourceRootFromRun(runDir: string): Promise<string> {
   let manifest: any
   try { manifest = JSON.parse(await readFile(join(runDir, 'manifest.json'), 'utf8')) }
@@ -155,6 +173,13 @@ export async function materializeValidationDependencies(opts: MaterializeValidat
   const sourceInputs = await dependencyInputs(sourceRoot, opts.manager, destinationInputs.lockfile)
   if (sourceInputs.inputsSha256 !== destinationInputs.inputsSha256) {
     throw new Error(`validation dependency inputs differ from originating workspace (${destinationInputs.lockfile})`)
+  }
+
+  if (opts.manager === 'yarn' && await yarnPnpReady(cwd)) {
+    if (!await yarnPnpReady(sourceRoot)) {
+      throw new Error('validation Yarn PnP view is not present in the originating workspace')
+    }
+    return
   }
 
   const destinationModules = join(cwd, 'node_modules')
