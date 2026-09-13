@@ -7,10 +7,16 @@ import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { pathToFileURL } from 'node:url'
 import { prepareValidationSubprocessEnvironment } from '../../src/validation/runner.ts'
+import { needsFileBackedWindowsStdio } from '../../src/platform/captured-exec.ts'
 
 const execFileP = promisify(execFile)
+const liveSkip = process.platform !== 'win32'
+  ? 'Windows-only host behavior'
+  : needsFileBackedWindowsStdio()
+    ? 'authoritative validation already runs inside the DSH Windows ACL sandbox'
+    : false
 
-test('Windows ACL sandbox can snapshot the exact Host-trusted validation worktree with Git', { skip: process.platform !== 'win32' }, async () => {
+test('Windows ACL sandbox can snapshot the exact Host-trusted validation worktree with Git', { skip: liveSkip }, async () => {
   const { AclSandbox, tempWriteSid, workspaceWriteSid } = await import('@deepseek-ai/dsh-sandbox-windows-acl')
   const workspace = await mkdtemp(join(tmpdir(), 'planx-acl-git-workspace-'))
   const privateTemp = await mkdtemp(join(tmpdir(), 'planx-acl-git-temp-'))
