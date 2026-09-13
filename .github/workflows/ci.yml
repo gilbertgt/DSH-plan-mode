@@ -62,8 +62,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '24' }
-      # Deliberately dependency-free: Node 22 release lanes already cover
-      # typecheck/build/package. This lane catches OS/Node machine behavior.
+      # Platform integration tests now exercise orchestration modules that import
+      # DSH runtime packages. Install the locked dependencies, while continuing
+      # to avoid duplicating typecheck/build/package verification from Node 22.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run test:platform
 
   compat-rc2:
