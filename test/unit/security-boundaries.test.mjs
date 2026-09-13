@@ -23,10 +23,13 @@ test('external issue control accepts only repository writers and above',async()=
   assert.deepEqual(texts,['owner-plan','writer-completion'])
 })
 
-test('native mutating roles expose only ownership-guarded file tools, never shell/run-code',async()=>{
+test('native mutating roles expose only registered ownership-guarded file tools, never shell/run-code',async()=>{
   let captured
   const ctx={
-    tools:{guard(){return()=>{}}},
+    tools:{
+      guard(){return()=>{}},
+      schemas(){return ['read','write','edit','apply_patch','pwsh','run_code'].map(name=>({name}))},
+    },
     subagents:{
       async start(_kind,options){
         captured=options
@@ -47,7 +50,7 @@ test('native mutating roles expose only ownership-guarded file tools, never shel
       ownership:{root:process.cwd(),paths:['src/a.ts']},
     })
     const allow=captured.toolFilter.allow
-    for(const denied of ['bash','pwsh','shell','run_code','mkdir'])assert.equal(allow.includes(denied),false)
+    for(const denied of ['bash','pwsh','shell','run_code','mkdir','write_file','edit_file'])assert.equal(allow.includes(denied),false)
     for(const permitted of ['read','write','edit','apply_patch'])assert.equal(allow.includes(permitted),true)
     assert.notEqual(captured.signal,undefined)
   }finally{restore()}
