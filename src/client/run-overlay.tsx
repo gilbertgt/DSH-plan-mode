@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { phaseLabel } from './role-route-ui.ts'
 
 export class RunOverlayService {
   #runId: string | undefined
@@ -23,6 +24,8 @@ export class RunOverlayService {
   subscribe(listener: () => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener) }
   #emit() { for (const listener of this.#listeners) listener() }
 }
+
+const TERMINAL_PHASES = ['COMPLETE', 'FAILED', 'BLOCKED', 'CANCELLED']
 
 export function RunOverlay({ service, rpc, t }: any) {
   const [runId, setRunId] = useState<string | undefined>(service.runId)
@@ -54,23 +57,24 @@ export function RunOverlay({ service, rpc, t }: any) {
   }, [runId, service])
 
   if (!runId) return null
+  const terminal = TERMINAL_PHASES.includes(run?.phase)
   return <div className="planx-overlay" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) service.close() }}>
     <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} className="planx-dialog" tabIndex={-1}>
-      <div className="planx-row planx-between"><b id={titleId}>Plan Run {runId}</b><button aria-label="Close" onClick={() => service.close()}>×</button></div>
+      <div className="planx-row planx-between"><b id={titleId}>{t('run.title')} {runId}</b><button aria-label={t('run.close')} onClick={() => service.close()}>×</button></div>
       {error && <div role="alert" className="planx-error">{error}</div>}
-      {!run ? <p>{t?.('loading') ?? 'Loading…'}</p> : <>
-        <p><b>{run.phase}</b>{run.message ? ` · ${run.message}` : ''}</p>
-        <progress aria-label="Plan task progress" max={Math.max(1, run.tasksTotal ?? 1)} value={run.tasksDone ?? 0}/>
-        <p>{run.tasksDone ?? 0}/{run.tasksTotal ?? 0} tasks · review round {run.reviewRound ?? 0}</p>
-        {run.activeTaskIds?.length > 0 && <p>Active: {run.activeTaskIds.join(', ')}</p>}
-        {run.review && <div className="planx-card"><b>Review</b><pre>{JSON.stringify(run.review, null, 2)}</pre></div>}
-        {Array.isArray(run.receipts) && <div className="planx-card"><b>Validation receipts</b><pre>{JSON.stringify(run.receipts, null, 2)}</pre></div>}
-        {run.usage && <div className="planx-card"><b>Usage</b><pre>{JSON.stringify(run.usage, null, 2)}</pre></div>}
-        {Array.isArray(run.worktrees) && run.worktrees.length > 0 && <div className="planx-card"><b>Worktrees</b><pre>{JSON.stringify(run.worktrees.map((w:any)=>({taskId:w.taskId,status:w.status,baseHead:w.baseHead})), null, 2)}</pre></div>}
+      {!run ? <p>{t('loading')}</p> : <>
+        <p><b>{phaseLabel(t, run.phase)}</b>{run.message ? ` · ${run.message}` : ''}</p>
+        <progress aria-label={t('run.progressAria')} max={Math.max(1, run.tasksTotal ?? 1)} value={run.tasksDone ?? 0}/>
+        <p>{t('run.tasks', { done: run.tasksDone ?? 0, total: run.tasksTotal ?? 0, round: run.reviewRound ?? 0 })}</p>
+        {run.activeTaskIds?.length > 0 && <p>{t('run.active')} {run.activeTaskIds.join(', ')}</p>}
+        {run.review && <div className="planx-card"><b>{t('run.review')}</b><pre>{JSON.stringify(run.review, null, 2)}</pre></div>}
+        {Array.isArray(run.receipts) && <div className="planx-card"><b>{t('run.receipts')}</b><pre>{JSON.stringify(run.receipts, null, 2)}</pre></div>}
+        {run.usage && <div className="planx-card"><b>{t('run.usage')}</b><pre>{JSON.stringify(run.usage, null, 2)}</pre></div>}
+        {Array.isArray(run.worktrees) && run.worktrees.length > 0 && <div className="planx-card"><b>{t('run.worktrees')}</b><pre>{JSON.stringify(run.worktrees.map((w:any)=>({taskId:w.taskId,status:w.status,baseHead:w.baseHead})), null, 2)}</pre></div>}
         <div className="planx-row">
-          {!['COMPLETE','FAILED','BLOCKED','CANCELLED'].includes(run.phase) && <button onClick={() => rpc('run-cancel', { runId }).then(() => setRun((r:any)=>({...r,phase:'CANCELLED'}))).catch((e:any)=>setError(e.message))}>{t?.('stop') ?? 'Stop'}</button>}
-          {run.phase === 'INTERRUPTED' && <button onClick={async () => { try { const result = await rpc('run-resume', { runId }); if (!result?.ok) setError(result?.reason ?? 'Resume blocked') } catch (e:any) { setError(e.message) } }}>{t?.('resume') ?? 'Resume safely'}</button>}
-          {['COMPLETE','FAILED','BLOCKED','CANCELLED'].includes(run.phase) && <button onClick={async () => { if (confirm('Remove Plan Orchestrator run artifacts and owned worktrees?')) { try { await rpc('run-cleanup', { runId }); service.close() } catch (e:any) { setError(e.message) } } }}>Cleanup</button>}
+          {!terminal && <button onClick={() => rpc('run-cancel', { runId }).then(() => setRun((r:any)=>({...r,phase:'CANCELLED'}))).catch((e:any)=>setError(e.message))}>{t('stop')}</button>}
+          {run.phase === 'INTERRUPTED' && <button onClick={async () => { try { const result = await rpc('run-resume', { runId }); if (!result?.ok) setError(result?.reason ?? t('run.resumeBlocked')) } catch (e:any) { setError(e.message) } }}>{t('resume')}</button>}
+          {terminal && <button onClick={async () => { if (confirm(t('run.cleanupConfirm'))) { try { await rpc('run-cleanup', { runId }); service.close() } catch (e:any) { setError(e.message) } } }}>{t('run.cleanup')}</button>}
         </div>
       </>}
     </section>

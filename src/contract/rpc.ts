@@ -1,5 +1,5 @@
 export const RPC_METHODS = [
-  'model-catalog', 'route-validate', 'run-list', 'run-detail', 'run-cancel', 'run-resume',
+  'model-catalog', 'model-capability', 'route-validate', 'run-list', 'run-detail', 'run-cancel', 'run-resume',
   'run-cleanup', 'diagnostics', 'external-preflight',
 ] as const
 export type RpcMethod = typeof RPC_METHODS[number]
