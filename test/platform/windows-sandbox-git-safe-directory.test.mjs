@@ -16,7 +16,7 @@ test('Windows ACL sandbox can snapshot the exact Host-trusted validation worktre
   const privateTemp = await mkdtemp(join(tmpdir(), 'planx-acl-git-temp-'))
   const validationDir = await mkdtemp(join(tmpdir(), 'planx-acl-git-config-'))
   let prepared
-  let initialized = false
+  let sandbox
 
   try {
     await execFileP('git', ['init'], { cwd: workspace, windowsHide: true })
@@ -54,7 +54,7 @@ if (Object.keys(snapshot.paths).some(path => path !== 'probe.mjs')) {
 }
 `, 'utf8')
 
-    const sandbox = new AclSandbox({
+    sandbox = new AclSandbox({
       writableDirs: [workspace],
       tempDir: privateTemp,
       writeSid: workspaceWriteSid(workspace),
@@ -63,7 +63,6 @@ if (Object.keys(snapshot.paths).some(path => path !== 'probe.mjs')) {
     })
 
     await sandbox.init()
-    initialized = true
     const child = sandbox.spawn({
       command: process.execPath,
       args: ['--experimental-strip-types', probe],
@@ -73,11 +72,7 @@ if (Object.keys(snapshot.paths).some(path => path !== 'probe.mjs')) {
     assert.equal(result.exitCode, 0, result.stderr.toString('utf8'))
     assert.equal(result.stdout.toString('utf8'), '')
   } finally {
-    if (initialized) {
-      // AclSandbox.dispose() is synchronous in the supported DSH Windows backend.
-      const { AclSandbox } = await import('@deepseek-ai/dsh-sandbox-windows-acl')
-      void AclSandbox
-    }
+    sandbox?.dispose()
     await prepared?.cleanup()
     await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 }).catch(() => {})
     await rm(privateTemp, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 }).catch(() => {})
