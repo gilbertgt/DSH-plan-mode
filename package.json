@@ -1,6 +1,6 @@
 {
   "name": "@gilbertgt/dsh-plan-orchestrator",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Product-grade orchestration layer for DeepSeek Harness native Plan Mode",
   "type": "module",
   "main": "./lib/index.js",
