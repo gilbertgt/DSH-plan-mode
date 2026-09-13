@@ -6,7 +6,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { materializeValidationDependencies } from '../../src/validation/dependencies.ts'
 
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+function runNpm(args, cwd) {
+  if (process.platform === 'win32') {
+    // Node does not execute .cmd files directly through execFileSync on current
+    // Windows releases (spawnSync EINVAL). This test exercises dependency
+    // materialization, not the PowerShell launcher seam covered separately by
+    // validation-launcher.test.mjs, so invoke the npm.cmd shim through ComSpec.
+    const comspec = process.env.ComSpec ?? process.env.COMSPEC ?? 'cmd.exe'
+    return execFileSync(comspec, ['/d', '/s', '/c', `npm.cmd ${args.join(' ')}`], {
+      cwd, encoding: 'utf8', windowsHide: true,
+    })
+  }
+  return execFileSync('npm', args, { cwd, encoding: 'utf8' })
+}
 
 async function writeExecutableTool(binDir) {
   await mkdir(binDir, { recursive: true })
@@ -50,9 +62,9 @@ test('fresh isolated validation workspace runs dependency imports and local tool
     await writeExecutableTool(join(source, 'node_modules', '.bin'))
 
     await materializeValidationDependencies({ cwd: validation, runDir, manager: 'npm' })
-    const imported = execFileSync(npm, ['test', '--silent'], { cwd: validation, encoding: 'utf8', windowsHide: true })
+    const imported = runNpm(['test', '--silent'], validation)
     assert.match(imported, /DEPENDENCY=OK/)
-    const toolchain = execFileSync(npm, ['run', 'typecheck', '--silent'], { cwd: validation, encoding: 'utf8', windowsHide: true })
+    const toolchain = runNpm(['run', 'typecheck', '--silent'], validation)
     assert.match(toolchain, /TOOLCHAIN-OK/)
 
     await writeFile(join(validation, 'node_modules', 'fixture-dep', 'index.js'), "export const value = 'MUTATED'\n")
