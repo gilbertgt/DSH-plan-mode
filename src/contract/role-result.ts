@@ -1,12 +1,20 @@
 export interface RoleValidation { id: string; status: 'PASS'|'FAIL'|'INCONCLUSIVE'; detail?: string }
 export interface RoleResult { taskId: string; status: 'COMPLETE'|'BLOCKED'|'FAILED'; changed: string[]; validation: RoleValidation[]; remaining: string[]; contextExpansion: string[] }
+
+/**
+ * Model-facing structured-output schema. DeepSeek Harness intentionally accepts
+ * only a constrained raw JSON Schema vocabulary for subagent outputSchema.
+ * Size/count limits therefore stay in validateRoleResult(), where they are
+ * enforced after structured output is returned instead of being expressed with
+ * unsupported maxLength/maxItems keywords here.
+ */
 export const ROLE_RESULT_SCHEMA = {
   type:'object', additionalProperties:false,
   properties:{
-    taskId:{type:'string',maxLength:200}, status:{type:'string',enum:['COMPLETE','BLOCKED','FAILED']},
-    changed:{type:'array',items:{type:'string',maxLength:512},maxItems:200},
-    validation:{type:'array',items:{type:'object',additionalProperties:false,properties:{id:{type:'string',maxLength:200},status:{type:'string',enum:['PASS','FAIL','INCONCLUSIVE']},detail:{type:'string',maxLength:2000}},required:['id','status']},maxItems:30},
-    remaining:{type:'array',items:{type:'string',maxLength:1000},maxItems:30}, contextExpansion:{type:'array',items:{type:'string',maxLength:1000},maxItems:30},
+    taskId:{type:'string'}, status:{type:'string',enum:['COMPLETE','BLOCKED','FAILED']},
+    changed:{type:'array',items:{type:'string'}},
+    validation:{type:'array',items:{type:'object',additionalProperties:false,properties:{id:{type:'string'},status:{type:'string',enum:['PASS','FAIL','INCONCLUSIVE']},detail:{type:'string'}},required:['id','status']}},
+    remaining:{type:'array',items:{type:'string'}}, contextExpansion:{type:'array',items:{type:'string'}},
   }, required:['taskId','status','changed','validation','remaining','contextExpansion'],
 } as const
 const KEYS=new Set(['taskId','status','changed','validation','remaining','contextExpansion'])
