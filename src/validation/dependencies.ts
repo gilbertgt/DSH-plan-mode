@@ -1,9 +1,11 @@
+import { constants } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { chmod, copyFile, lstat, mkdir, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ParsedValidationCommand } from '../contract/plan-artifact.ts'
 
 const MARKER = '.planx-validation-dependencies.json'
+const COPY_BATCH = 32
 const LOCKFILES: Record<ParsedValidationCommand['manager'], readonly string[]> = {
   npm: ['npm-shrinkwrap.json', 'package-lock.json'],
   pnpm: ['pnpm-lock.yaml'],
@@ -101,14 +103,19 @@ async function copyTreeCollectingLinks(
   }
   if (sourceStat.isDirectory()) {
     await mkdir(destination, { recursive: true })
-    for (const entry of await readdir(source, { withFileTypes: true })) {
-      await copyTreeCollectingLinks(join(source, entry.name), join(destination, entry.name), sourceRoot, links)
+    const entries = await readdir(source, { withFileTypes: true })
+    for (let offset = 0; offset < entries.length; offset += COPY_BATCH) {
+      await Promise.all(entries.slice(offset, offset + COPY_BATCH).map(entry =>
+        copyTreeCollectingLinks(join(source, entry.name), join(destination, entry.name), sourceRoot, links),
+      ))
     }
     return
   }
   if (sourceStat.isFile()) {
     await mkdir(dirname(destination), { recursive: true })
-    await copyFile(source, destination)
+    // COPYFILE_FICLONE requests copy-on-write where supported and transparently
+    // falls back to a normal independent copy where reflinks are unavailable.
+    await copyFile(source, destination, constants.COPYFILE_FICLONE)
     if (process.platform !== 'win32') await chmod(destination, sourceStat.mode & 0o777)
     return
   }
@@ -116,8 +123,17 @@ async function copyTreeCollectingLinks(
 }
 
 async function createMappedLinks(links: LinkRecord[], destinationRoot: string): Promise<void> {
+  links.sort((a, b) => a.destinationPath.localeCompare(b.destinationPath))
   for (const link of links) {
     const mappedTarget = resolve(destinationRoot, link.targetRelativeToSourceRoot)
+    let mappedStat
+    try { mappedStat = await stat(mappedTarget) }
+    catch (error) {
+      throw new Error(`validation dependency link target is missing from isolated workspace: ${link.targetRelativeToSourceRoot}: ${(error as Error).message}`)
+    }
+    if ((link.directory && !mappedStat.isDirectory()) || (!link.directory && !mappedStat.isFile())) {
+      throw new Error(`validation dependency link target type changed in isolated workspace: ${link.targetRelativeToSourceRoot}`)
+    }
     const target = process.platform === 'win32' && link.directory
       ? mappedTarget
       : relative(dirname(link.destinationPath), mappedTarget) || '.'
@@ -178,6 +194,12 @@ export async function materializeValidationDependencies(opts: MaterializeValidat
   try {
     await copyTreeCollectingLinks(sourceModules, destinationModules, sourceRoot, links)
     await createMappedLinks(links, cwd)
+    // Re-read the authoritative inputs after copying. If package metadata or the
+    // lockfile changed while the snapshot was being materialized, fail closed.
+    const sourceAfter = await dependencyInputs(sourceRoot, opts.manager, destinationInputs.lockfile)
+    if (sourceAfter.inputsSha256 !== sourceInputs.inputsSha256) {
+      throw new Error(`originating dependency inputs changed during materialization (${destinationInputs.lockfile})`)
+    }
     const marker: DependencyMarker = {
       schemaVersion: 1,
       manager: opts.manager,
