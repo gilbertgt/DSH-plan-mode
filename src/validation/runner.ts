@@ -161,19 +161,19 @@ export async function runValidation(opts: RunValidationOptions): Promise<Validat
   await mkdir(validationDir, { recursive: true })
   const prefix = `${safe(opts.phase)}-${safe(opts.runId)}-${safe(opts.commandId)}`
   const preparedEnvironment = await prepareValidationSubprocessEnvironment(opts.cwd, validationDir, prefix)
-  const spec = shell.resolve({
-    command: executableCommand,
-    workdir: opts.cwd,
-    timeoutMs: opts.timeoutMs,
-    stdoutMaxBytes: opts.capBytes,
-    // DSH_* variables are stripped by the subprocess seam. The marker selects
-    // file-backed nested stdio; GIT_CONFIG_GLOBAL scopes exact safe.directory
-    // trust to this validation subprocess without modifying ~/.gitconfig.
-    env: preparedEnvironment.env,
-    sandboxPolicy,
-  })
   let result: any
   try {
+    const spec = shell.resolve({
+      command: executableCommand,
+      workdir: opts.cwd,
+      timeoutMs: opts.timeoutMs,
+      stdoutMaxBytes: opts.capBytes,
+      // DSH_* variables are stripped by the subprocess seam. The marker selects
+      // file-backed nested stdio; GIT_CONFIG_GLOBAL scopes exact safe.directory
+      // trust to this validation subprocess without modifying ~/.gitconfig.
+      env: preparedEnvironment.env,
+      sandboxPolicy,
+    })
     result = await shell.run(spec)
   } finally {
     await preparedEnvironment.cleanup()
