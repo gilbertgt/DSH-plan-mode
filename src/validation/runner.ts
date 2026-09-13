@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import type { ParsedValidationCommand } from '../contract/plan-artifact.ts'
 import { snapshotDirty, snapshotHash } from '../git/fingerprints.ts'
 import { fullHead } from '../git/repository.ts'
+import { materializeValidationDependencies } from './dependencies.ts'
 import { resolveValidationExecutable, type LauncherOptions } from './launcher.ts'
 import { hashBytes, type ValidationReceipt, type ValidationSandboxFacts } from './receipts.ts'
 
@@ -43,6 +44,8 @@ export interface RunValidationOptions {
   sessionId?: string
   /** Platform/environment/probe overrides for launcher resolution; a test seam only. */
   launcher?: LauncherOptions
+  /** Override dependency materialization. Configured host validation enables it; injected-shell tests disable it by default. */
+  provisionDependencies?: boolean
 }
 
 function sandboxFacts(value: any): ValidationSandboxFacts | undefined {
@@ -64,11 +67,19 @@ function sandboxEnforcementAccepted(sandbox: ValidationSandboxFacts | undefined)
 export async function runValidation(opts: RunValidationOptions): Promise<ValidationReceipt> {
   const shell = opts.shell ?? configuredShell
   if (!shell?.resolve || !shell?.run) throw new Error('sandboxed DSH shell executor unavailable for host validation')
-  // Parsing happens inside the resolver, before the shell exists in any form:
-  // an unsafe command and a nonexistent package script are both rejected ahead
-  // of `shell.resolve`, and launcher probing only ever sees a parsed manager.
+  // Parsing happens inside the resolver before shell.resolve: unsafe commands
+  // fail closed before launcher probing or executable shell resolution.
   const { parsed, executableCommand } = resolveValidationExecutable(opts.command, opts.launcher)
   await assertExistingPackageScript(opts.cwd, parsed)
+
+  // Production host validation uses the configured DSH shell and always runs in
+  // a fresh detached worktree. Materialize a private dependency snapshot before
+  // taking the mutation baseline. Tests that inject a shell keep their existing
+  // lightweight fixture behavior unless they explicitly request provisioning.
+  const provisionDependencies = opts.provisionDependencies ?? opts.shell === undefined
+  if (provisionDependencies) {
+    await materializeValidationDependencies({ cwd: opts.cwd, runDir: opts.runDir, manager: parsed.manager })
+  }
 
   const before = await snapshotDirty(opts.cwd)
   const head = await fullHead(opts.cwd)
