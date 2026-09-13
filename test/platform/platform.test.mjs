@@ -4,18 +4,22 @@ import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { execFileCaptured } from '../../src/platform/captured-exec.ts'
 import { assertRepoPathConfined } from '../../src/git/repository.ts'
 import { minimalSdkEnv, sdkHarnessOptions } from '../../src/orchestration/sdk-backend.ts'
 
 test('platform supports CJK and spaces through Git machine output', async()=>{
   const root=await mkdtemp(join(tmpdir(),'planx 平台 '))
+  // Confined Windows grandchildren cannot open libuv's named-pipe stdio, so a
+  // Git call that captures output must use the file-backed seam. Calls that
+  // need no output keep `stdio: 'ignore'`, which the restricted token permits.
   execFileSync('git',['init'],{cwd:root,stdio:'ignore'})
-  execFileSync('git',['config','user.email','test@example.com'],{cwd:root})
-  execFileSync('git',['config','user.name','test'],{cwd:root})
+  execFileSync('git',['config','user.email','test@example.com'],{cwd:root,stdio:'ignore'})
+  execFileSync('git',['config','user.name','test'],{cwd:root,stdio:'ignore'})
   await writeFile(join(root,'初始.txt'),'base')
-  execFileSync('git',['add','.'],{cwd:root});execFileSync('git',['commit','-m','base'],{cwd:root,stdio:'ignore'})
+  execFileSync('git',['add','.'],{cwd:root,stdio:'ignore'});execFileSync('git',['commit','-m','base'],{cwd:root,stdio:'ignore'})
   await writeFile(join(root,'韓文 이름.txt'),'x')
-  const out=execFileSync('git',['ls-files','--others','--exclude-standard','-z'],{cwd:root})
+  const out=(await execFileCaptured('git',['ls-files','--others','--exclude-standard','-z'],{cwd:root})).stdout
   assert.match(out.toString('utf8'),/韓文 이름\.txt/)
 })
 

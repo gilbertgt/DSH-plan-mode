@@ -1,16 +1,30 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { promisify } from 'node:util'
 import { pathToFileURL } from 'node:url'
+import { execFileCaptured, needsFileBackedWindowsStdio } from '../../src/platform/captured-exec.ts'
 import { prepareValidationSubprocessEnvironment } from '../../src/validation/runner.ts'
 
-const execFileP = promisify(execFile)
+/**
+ * This test builds a nested ACL sandbox, which requires writing a DACL on the
+ * nested writable root through `SetNamedSecurityInfoW`. DSH's outer sandbox
+ * deliberately grants only GRANT_MASK (0x110156), which excludes WRITE_DAC and
+ * WRITE_OWNER so a confined child can never rewrite a DACL to escape the
+ * allowlist, and a restricted token's pass-2 check does not honour the owner's
+ * implicit WRITE_DAC. A nested init() therefore fails with Win32 5 by design.
+ * Hosts without the sandbox (including the CI Windows lane) still run this test
+ * for real, which is what keeps the Git trust regression covered.
+ */
+const inHostSandbox = needsFileBackedWindowsStdio()
+const skip = process.platform !== 'win32'
+  ? 'Windows-only platform requirement'
+  : inHostSandbox
+    ? 'nested ACL sandbox needs WRITE_DAC, which the host sandbox GRANT_MASK deliberately excludes'
+    : false
 
-test('Windows ACL sandbox can snapshot the exact Host-trusted validation worktree with Git', { skip: process.platform !== 'win32' }, async () => {
+test('Windows ACL sandbox can snapshot the exact Host-trusted validation worktree with Git', { skip }, async () => {
   const { AclSandbox, tempWriteSid, workspaceWriteSid } = await import('@deepseek-ai/dsh-sandbox-windows-acl')
   const workspace = await mkdtemp(join(tmpdir(), 'planx-acl-git-workspace-'))
   const privateTemp = await mkdtemp(join(tmpdir(), 'planx-acl-git-temp-'))
@@ -19,14 +33,18 @@ test('Windows ACL sandbox can snapshot the exact Host-trusted validation worktre
   let sandbox
 
   try {
-    await execFileP('git', ['init'], { cwd: workspace, windowsHide: true })
+    // Git calls go through the file-backed seam: `windowsHide: true` is not
+    // compatible with DSH's restricted token (CREATE_NO_WINDOW risks
+    // STATUS_DLL_INIT_FAILED) and piped stdio is unavailable to a confined
+    // grandchild. These assertions also hold on a plain Windows host.
+    await execFileCaptured('git', ['init'], { cwd: workspace })
     await writeFile(join(workspace, 'tracked.txt'), 'baseline\n', 'utf8')
-    await execFileP('git', ['add', 'tracked.txt'], { cwd: workspace, windowsHide: true })
-    await execFileP('git', [
+    await execFileCaptured('git', ['add', 'tracked.txt'], { cwd: workspace })
+    await execFileCaptured('git', [
       '-c', 'user.name=Plan Orchestrator Test',
       '-c', 'user.email=plan-orchestrator@example.invalid',
       'commit', '-m', 'baseline',
-    ], { cwd: workspace, windowsHide: true })
+    ], { cwd: workspace })
 
     prepared = await prepareValidationSubprocessEnvironment(
       workspace,

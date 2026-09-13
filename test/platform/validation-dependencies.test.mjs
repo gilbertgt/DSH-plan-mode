@@ -1,23 +1,30 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFileCaptured } from '../../src/platform/captured-exec.ts'
 import { materializeValidationDependencies } from '../../src/validation/dependencies.ts'
 
-function runNpm(args, cwd) {
+/**
+ * Run one npm invocation and capture its output.
+ *
+ * The file-backed seam is mandatory here: under DSH's Windows WRITE_RESTRICTED
+ * sandbox a confined grandchild cannot open libuv's named-pipe stdio, so
+ * `execFileSync` with the default piped stdio fails with `spawn EPERM` before
+ * npm ever starts. `execFileCaptured` falls back to ordinary `execFile` when no
+ * sandbox marker is present, so this stays exact on every host.
+ */
+async function runNpm(args, cwd) {
   if (process.platform === 'win32') {
     // Node does not execute .cmd files directly through execFileSync on current
     // Windows releases (spawnSync EINVAL). This test exercises dependency
     // materialization, not the PowerShell launcher seam covered separately by
     // validation-launcher.test.mjs, so invoke the npm.cmd shim through ComSpec.
     const comspec = process.env.ComSpec ?? process.env.COMSPEC ?? 'cmd.exe'
-    return execFileSync(comspec, ['/d', '/s', '/c', `npm.cmd ${args.join(' ')}`], {
-      cwd, encoding: 'utf8', windowsHide: true,
-    })
+    return (await execFileCaptured(comspec, ['/d', '/s', '/c', `npm.cmd ${args.join(' ')}`], { cwd })).stdout.toString('utf8')
   }
-  return execFileSync('npm', args, { cwd, encoding: 'utf8' })
+  return (await execFileCaptured('npm', args, { cwd })).stdout.toString('utf8')
 }
 
 async function writeExecutableTool(binDir) {
@@ -62,9 +69,9 @@ test('fresh isolated validation workspace runs dependency imports and local tool
     await writeExecutableTool(join(source, 'node_modules', '.bin'))
 
     await materializeValidationDependencies({ cwd: validation, runDir, manager: 'npm' })
-    const imported = runNpm(['test', '--silent'], validation)
+    const imported = await runNpm(['test', '--silent'], validation)
     assert.match(imported, /DEPENDENCY=OK/)
-    const toolchain = runNpm(['run', 'typecheck', '--silent'], validation)
+    const toolchain = await runNpm(['run', 'typecheck', '--silent'], validation)
     assert.match(toolchain, /TOOLCHAIN-OK/)
 
     await writeFile(join(validation, 'node_modules', 'fixture-dep', 'index.js'), "export const value = 'MUTATED'\n")

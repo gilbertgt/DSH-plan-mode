@@ -4,8 +4,26 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { needsFileBackedWindowsStdio } from '../../src/platform/captured-exec.ts'
 
-test('Windows ACL sandbox can capture a nested child through file-backed stdio', { skip: process.platform !== 'win32' }, async () => {
+/**
+ * This test builds a nested ACL sandbox, which requires writing a DACL on the
+ * nested writable root through `SetNamedSecurityInfoW`. DSH's outer sandbox
+ * deliberately grants only GRANT_MASK (0x110156), which excludes WRITE_DAC and
+ * WRITE_OWNER so a confined child can never rewrite a DACL to escape the
+ * allowlist, and a restricted token's pass-2 check does not honour the owner's
+ * implicit WRITE_DAC. A nested init() therefore fails with Win32 5 by design,
+ * independently of stdio. Hosts without the sandbox (including the CI Windows
+ * lane) still run this test for real.
+ */
+const inHostSandbox = needsFileBackedWindowsStdio()
+const skip = process.platform !== 'win32'
+  ? 'Windows-only host behavior'
+  : inHostSandbox
+    ? 'nested ACL sandbox needs WRITE_DAC, which the host sandbox GRANT_MASK deliberately excludes'
+    : false
+
+test('Windows ACL sandbox can capture a nested child through file-backed stdio', { skip }, async () => {
   const { AclSandbox, tempWriteSid, workspaceWriteSid } = await import('@deepseek-ai/dsh-sandbox-windows-acl')
   const workspace = await mkdtemp(join(tmpdir(), 'planx-acl-workspace-'))
   const privateTemp = await mkdtemp(join(tmpdir(), 'planx-acl-temp-'))
