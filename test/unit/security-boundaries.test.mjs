@@ -26,6 +26,7 @@ test('external issue control accepts only repository writers and above',async()=
 test('native mutating roles expose only registered ownership-guarded file tools, never shell/run-code',async()=>{
   let captured
   const ctx={
+    on(){return()=>{}},
     tools:{
       guard(){return()=>{}},
       schemas(){return ['read','write','edit','apply_patch','pwsh','run_code'].map(name=>({name}))},

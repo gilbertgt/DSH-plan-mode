@@ -3,6 +3,7 @@ import { ROLE_RESULT_SCHEMA, validateRoleResult, type RoleResult } from '../cont
 import { usageFromSession, type UsageSample } from '../telemetry/usage.ts'
 import { withRoleTimeout } from '../runtime-policy.ts'
 import { installChildOwnershipGuard } from './ownership-guard.ts'
+import { installNativeMutatingChildSandbox } from './native-child-policy.ts'
 export type RoleExecutionResult=RoleResult&{__usage?:UsageSample}
 export interface NativeRunRequest{parent:any;role:'worker'|'integrator'|'reviewer';taskId:string;prompt:string;route:RouteChoice;signal:AbortSignal;persona?:string;toolFilter?:unknown;ownership?:{root:string;paths:string[]}}
 
@@ -55,9 +56,11 @@ export class NativeSpawnBackend{
   constructor(ctx:any){this.ctx=ctx}
   async run(req:NativeRunRequest):Promise<RoleExecutionResult>{
     const started=Date.now()
-    const release=req.ownership?installChildOwnershipGuard(this.ctx,req.parent,req.ownership.root,req.ownership.paths):()=>{}
+    const sandboxScope=req.ownership?installNativeMutatingChildSandbox(this.ctx):undefined
+    let releaseOwnership=()=>{}
     let run:any
     try{
+      if(req.ownership)releaseOwnership=installChildOwnershipGuard(this.ctx,req.parent,req.ownership.root,req.ownership.paths)
       const cwd=req.parent?.session?.header?.cwd
       const signal=req.ownership?withRoleTimeout(cwd,req.signal):req.signal
       // A mutating native role never receives shell/pwsh/run-code. Every exposed
@@ -68,12 +71,18 @@ export class NativeSpawnBackend{
         prompt:[{type:'text',text:req.prompt}],
         parent:req.parent,
         signal,
-        agentOptions:req.route,
+        // A call-scoped marker lets the synchronous agent/created hook override
+        // only this mutating child to workspace-write after DSH inherits the
+        // strict-read-only parent policy. Reviewer children are never marked.
+        agentOptions:sandboxScope?sandboxScope.mark(req.route):req.route,
         outputSchema:ROLE_RESULT_SCHEMA,
         maxDepth:1,
         toolFilter,
         persona:req.persona,
       })
+      // Creation has completed and the exact child consumed the marker; no
+      // later agent/created event needs this call-scoped listener.
+      sandboxScope?.dispose()
       const result=await run.result
       if(result.stopReason!=='completed')throw new Error(`subagent ${req.taskId} stopped: ${result.stopReason}${result.diagnostic?`: ${result.diagnostic}`:''}`)
       const valid=validateRoleResult(result.structured,req.taskId)
@@ -81,7 +90,9 @@ export class NativeSpawnBackend{
       usage.durationMs=Date.now()-started
       return{...valid,__usage:usage}
     }finally{
-      try{if(run)await run.dispose()}finally{release()}
+      try{if(run)await run.dispose()}finally{
+        try{releaseOwnership()}finally{sandboxScope?.dispose()}
+      }
     }
   }
 }
