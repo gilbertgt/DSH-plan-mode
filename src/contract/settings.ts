@@ -70,6 +70,24 @@ const WORKSPACE_KEYS = new Set(['roles'])
 
 export const defaultRoute = (): RoleRoute => ({ mode: 'current', fallbacks: [] })
 
+/**
+ * Rebuild one route choice with every optional field present only when it holds
+ * a real value. Every DSH boundary this plugin crosses — `Session.append`,
+ * subagent descriptor snapshots, `llm.resolveCallConfig` and SDK child options —
+ * validates lossless JSON, where an explicitly `undefined` property is rejected
+ * while an absent one is fine. An unresolved (inherited) route legitimately has
+ * no provider/model yet, so those are omitted too rather than written as
+ * `undefined`; `routeChoices` filters such a candidate out before use.
+ */
+export function losslessRouteChoice(choice: RouteChoice): RouteChoice {
+  const route: Record<string, unknown> = {}
+  if (choice.provider !== undefined) route.provider = choice.provider
+  if (choice.model !== undefined) route.model = choice.model
+  if (choice.reasoningEffort !== undefined) route.reasoningEffort = choice.reasoningEffort
+  if (choice.maxTokens !== undefined) route.maxTokens = choice.maxTokens
+  return route as unknown as RouteChoice
+}
+
 export const DEFAULT_SETTINGS: PlanSettings = Object.freeze<PlanSettings>({
   enabled: true,
   roles: {

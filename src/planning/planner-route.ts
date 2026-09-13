@@ -11,12 +11,9 @@ export interface ResolvedRoute {
 export async function validateFixedRoute(llm: any, route: RoleRoute): Promise<ResolvedRoute> {
   if (route.mode === 'current') return {}
   if (!route.provider || !route.model) throw new Error('fixed route needs provider and model')
-  const requested = {
-    provider: route.provider,
-    model: route.model,
-    ...(route.reasoningEffort ? { reasoningEffort: route.reasoningEffort } : {}),
-    ...(route.maxTokens ? { maxTokens: route.maxTokens } : {}),
-  }
+  const requested: ResolvedRoute = { provider: route.provider, model: route.model }
+  if (route.reasoningEffort !== undefined) requested.reasoningEffort = route.reasoningEffort
+  if (route.maxTokens !== undefined) requested.maxTokens = route.maxTokens
   if (typeof llm?.resolveCallConfig !== 'function') throw new Error('DSH llm.resolveCallConfig is unavailable')
   await llm.resolveCallConfig(requested)
   for (const fallback of route.fallbacks) await llm.resolveCallConfig(fallback)
@@ -30,15 +27,15 @@ function routeAt(route: RoleRoute, current: any, index: number): RouteChoice | u
       return {
         provider: current.provider,
         model: current.model,
-        reasoningEffort: current.reasoningEffort,
-        maxTokens: current.maxTokens,
+        ...(current.reasoningEffort !== undefined ? { reasoningEffort: current.reasoningEffort } : {}),
+        ...(current.maxTokens !== undefined ? { maxTokens: current.maxTokens } : {}),
       }
     }
     return {
       provider: route.provider!,
       model: route.model!,
-      reasoningEffort: route.reasoningEffort,
-      maxTokens: route.maxTokens,
+      ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort } : {}),
+      ...(route.maxTokens !== undefined ? { maxTokens: route.maxTokens } : {}),
     }
   }
   return route.fallbacks[index - 1]
@@ -62,12 +59,24 @@ export function installPlannerRoute(
     const selected = routeAt(route, current, fallbackIndex.get(agent) ?? 0)
     if (!selected) return current
     await ctx.llm.resolveCallConfig(selected)
+    // The routed request must not inherit the previous model's optional controls.
+    // `reasoningEffort` is replaced outright (omitted when the route declares
+    // none) so a fixed route cannot carry a stale effort to a model that does
+    // not support it; `maxTokens` keeps its original fallback to the native
+    // value when the route does not specify one. Neither may ever be written as
+    // an explicit `undefined`, which the DSH lossless-JSON boundaries reject.
+    const { reasoningEffort: _inheritedEffort, maxTokens: inheritedMaxTokens, ...rest } = current
+    void _inheritedEffort
     return {
-      ...current,
+      ...rest,
       provider: selected.provider,
       model: selected.model,
-      reasoningEffort: selected.reasoningEffort,
-      maxTokens: selected.maxTokens ?? current.maxTokens,
+      ...(selected.reasoningEffort !== undefined ? { reasoningEffort: selected.reasoningEffort } : {}),
+      ...(selected.maxTokens !== undefined
+        ? { maxTokens: selected.maxTokens }
+        : inheritedMaxTokens !== undefined
+          ? { maxTokens: inheritedMaxTokens }
+          : {}),
     }
   })
 
