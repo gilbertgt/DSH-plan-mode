@@ -1,5 +1,5 @@
 import { RPC_METHODS, assertRpcBody, boundedId } from './contract/rpc.ts'
-import { modelCatalog, routeValidate } from './model-catalog.ts'
+import { modelCatalog, modelCapability, routeValidate } from './model-catalog.ts'
 
 const MAX_RESPONSE = 2 * 1024 * 1024
 
@@ -37,6 +37,12 @@ export function registerRpc(connection: any, deps: any) {
           let data: unknown
           switch (method) {
             case 'model-catalog': data = await modelCatalog(deps.ctx); break
+            case 'model-capability':
+              data = await modelCapability(deps.ctx, {
+                provider: boundedId(input.provider, 'provider'),
+                model: boundedId(input.model, 'model'),
+              })
+              break
             case 'route-validate': data = await routeValidate(deps.ctx, input.route as any); break
             case 'run-list': data = deps.runList?.({ sessionId: typeof input.sessionId === 'string' ? boundedId(input.sessionId, 'sessionId') : undefined }) ?? []; break
             case 'run-detail': data = await deps.runDetail?.({ runId: boundedId(input.runId, 'runId') }); break

@@ -40,7 +40,7 @@ export function apply(ctx: any) {
 
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right', id: 'plan-orchestrator-run', order: 20, locale: NS,
-    inject: (sessionId: string) => ({ rpc, sessionId, overlay }),
+    inject: (sessionId: string) => ({ rpc, sessionId, overlay, t }),
   }, RunChip))
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({

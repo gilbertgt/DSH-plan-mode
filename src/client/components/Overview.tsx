@@ -1,13 +1,40 @@
 import React from 'react'
-export function Overview({ diagnostics, settings }: any) {
-  const caps = [
-    ['Native Plan Mode', diagnostics?.nativePlanMode], ['SDK parallel backend', diagnostics?.sdkAvailable],
-    ['Git', diagnostics?.gitAvailable], ['LSP', diagnostics?.lspAvailable], ['gh', diagnostics?.ghAvailable],
-    ['Settings writable', diagnostics?.settingsWritable],
-  ]
+
+export function Overview({ diagnostics, settings, t }: any) {
+  const capabilities = [
+    ['overview.capability.nativePlanMode', diagnostics?.nativePlanMode],
+    ['overview.capability.sdkParallel', diagnostics?.sdkAvailable],
+    ['overview.capability.git', diagnostics?.gitAvailable],
+    ['overview.capability.lsp', diagnostics?.lspAvailable],
+    ['overview.capability.gh', diagnostics?.ghAvailable],
+    ['overview.capability.settingsWritable', diagnostics?.settingsWritable],
+  ] as const
+  const available = (value: unknown) => value === undefined ? '—' : value ? t('common.available') : t('common.unavailable')
+  // Versions and capability state are host data; only the labels are localized.
+  const supported = (diagnostics?.compatibility?.supported ?? []).join(', ')
+  const preview = (diagnostics?.compatibility?.preview ?? []).join(', ')
+
   return <div className="planx-grid">
-    <div className="planx-card"><h3>Compatibility</h3><div>DSH: {diagnostics?.dshVersion ?? 'detecting'}</div><div>Plugin: {diagnostics?.pluginVersion ?? '1.0.0'}</div><div>Supported: 0.1.5-rc.1</div><div>Preview: 0.1.5-rc.2</div></div>
-    <div className="planx-card"><h3>Capabilities</h3><div className="planx-kv">{caps.flatMap(([name,value])=>[<span key={`${name}-n`}>{name}</span>,<span key={`${name}-v`}>{value===undefined?'—':value?'Available':'Unavailable'}</span>])}</div></div>
-    <div className="planx-card"><h3>Safety</h3><div>Plan Orchestrator: {settings?.enabled?'enabled':'disabled'}</div><div>Strict Planner read-only: {settings?.planning?.strictReadOnly?'on':'off'}</div><div>Ownership / trusted validation: mandatory</div>{diagnostics?.readOnlyDegraded&&<div role="alert">Degraded: {diagnostics.readOnlyDegraded}</div>}</div>
+    <div className="planx-card">
+      <h3>{t('overview.compatibility')}</h3>
+      <div>{t('overview.dshVersion')}: {diagnostics?.dshVersion ?? t('common.detecting')}</div>
+      <div>{t('overview.pluginVersion')}: {diagnostics?.pluginVersion ?? t('common.detecting')}</div>
+      {supported && <div>{t('overview.supported')}: {supported}</div>}
+      {preview && <div>{t('overview.preview')}: {preview}</div>}
+    </div>
+    <div className="planx-card">
+      <h3>{t('overview.capabilities')}</h3>
+      <div className="planx-kv">{capabilities.flatMap(([name, value]) => [
+        <span key={`${name}-n`}>{t(name)}</span>,
+        <span key={`${name}-v`}>{available(value)}</span>,
+      ])}</div>
+    </div>
+    <div className="planx-card">
+      <h3>{t('overview.safety')}</h3>
+      <div>{t('overview.orchestrator')}: {settings?.enabled ? t('common.enabled') : t('common.disabled')}</div>
+      <div>{t('overview.strictReadOnly')}: {settings?.planning?.strictReadOnly ? t('common.on') : t('common.off')}</div>
+      <div>{t('overview.ownership')}: {t('common.mandatory')}</div>
+      {diagnostics?.readOnlyDegraded && <div role="alert">{t('overview.degraded', { reason: diagnostics.readOnlyDegraded })}</div>}
+    </div>
   </div>
 }
