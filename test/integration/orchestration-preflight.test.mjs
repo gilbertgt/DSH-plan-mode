@@ -206,10 +206,13 @@ test('switching a planner to a fixed route must not inherit the previous reasoni
 })
 
 // C2. terminal persistence failure must never announce the original success phase.
-test('a terminal manifest write failure converges on FAILED and never announces COMPLETE',{timeout:TEST_TIMEOUT},async()=>{
-  const root=await mkdtemp(join(tmpdir(),'planx-terminal-fail-'))
+// Case A: the intended terminal write fails once, the retry succeeds. The
+// on-disk manifest must still converge on FAILED + terminal, otherwise recovery
+// would later misread the run as INTERRUPTED.
+test('a transient terminal write failure is retried and still lands FAILED + terminal on disk',{timeout:TEST_TIMEOUT},async()=>{
+  const root=await mkdtemp(join(tmpdir(),'planx-terminal-retry-'))
   try{
-    // writes: 1 = approval, 2 = PREFLIGHT, 3 = terminal (fails).
+    // writes: 1 = approval, 2 = PREFLIGHT, 3 = intended terminal (fails), 4 = retry (succeeds).
     const st=store(root,{failWriteAt:[3]})
     const {agent:a,events}=agent('s-terminal')
     const service=new OrchestrationService(st,async()=>{})
@@ -217,6 +220,12 @@ test('a terminal manifest write failure converges on FAILED and never announces 
     assert.equal(await service.onParentIdle('s-terminal'),true)
     await waitFor(()=>events.some(event=>event.type==='planx/run-terminal'),{label:'terminal event'})
     await waitFor(()=>service.activeRun('s-terminal')===undefined,{label:'run settled'})
+
+    // The retry must have persisted the converged terminal state on disk.
+    const manifest=st.manifest(runId)
+    assert.equal(manifest.phase,'FAILED','the retried write must persist FAILED')
+    assert.equal(manifest.terminal,true,'the retried write must persist terminal:true')
+    assert.equal(st.writes,4,'exactly one retry is attempted')
 
     const terminalPhases=events.filter(event=>event.type==='planx/run-terminal').map(event=>event.data.phase)
     assert.equal(terminalPhases.includes('COMPLETE'),false,`no terminal event may announce COMPLETE after persistence failed: ${terminalPhases.join(',')}`)
@@ -228,10 +237,12 @@ test('a terminal manifest write failure converges on FAILED and never announces 
   }finally{await cleanup(root)}
 })
 
-test('finalize never throws even when terminal persistence and session append both fail',{timeout:TEST_TIMEOUT},async()=>{
+// Case B: the intended write and the retry both fail, and session.append fails
+// too. finalize() must still contain everything and leave the FAILED run view.
+test('a persistent terminal write failure stays contained and never announces COMPLETE',{timeout:TEST_TIMEOUT},async()=>{
   const root=await mkdtemp(join(tmpdir(),'planx-double-fail-'))
   try{
-    // The terminal write (3) and every later write fail.
+    // The intended terminal write (3), the retry (4) and all later writes fail.
     const st=store(root,{failWriteAt:[3,4,5,6]})
     const {agent:a,events}=agent('s-double')
     // Rejections escaping the run task are surfaced by start(), so capture them.
@@ -261,6 +272,13 @@ test('finalize never throws even when terminal persistence and session append bo
     const view=service.list('s-double').find(item=>item.runId===runId)
     assert.equal(view.phase,'FAILED','the run view is the last resort when persistence and append both fail')
     assert.match(String(view.message),/terminal manifest persistence failed/)
+    assert.match(String(view.message),/retry failed/)
+    // The runtime must not drift back to a non-failure state.
+    assert.notEqual(view.phase,'COMPLETE')
+    assert.notEqual(view.status,'COMPLETE')
+    // Exactly one retry: the intended write plus the retry, and nothing after.
+    assert.equal(st.writes,4,'the retry must be attempted exactly once')
+    for(const event of events)if(event.type.startsWith('planx/'))assert.notEqual(event.data.phase,'COMPLETE')
   }finally{await cleanup(root)}
 })
 

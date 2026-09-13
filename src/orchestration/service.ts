@@ -402,6 +402,22 @@ export class OrchestrationService {
   }
 
   /**
+   * Best-effort terminal manifest write. Returns the failure instead of
+   * throwing so the caller can decide how to converge.
+   */
+  private async writeTerminal(launch: OrchestratorLaunch, runId: string, phase: string): Promise<{ ok: true } | { ok: false; error: unknown }> {
+    try {
+      const latest = await this.store.readManifest(launch.sessionId, runId)
+      latest.phase = phase
+      latest.terminal = true
+      await this.store.writeManifest(latest)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error }
+    }
+  }
+
+  /**
    * Persist the terminal state. Never throws: a session whose append is
    * unavailable must still not be left with a non-terminal manifest.
    */
@@ -410,17 +426,18 @@ export class OrchestrationService {
     const at = new Date().toISOString()
     let effectivePhase = phase
     let effectiveMessage = message
-    try {
-      const latest = await this.store.readManifest(launch.sessionId, runId)
-      latest.phase = effectivePhase
-      latest.terminal = true
-      await this.store.writeManifest(latest)
-    } catch (error) {
-      // Terminal persistence failed: the run cannot be reported as its intended
-      // phase any more. Converge the effective phase on FAILED so no later step
-      // can announce success, and never let this path throw.
+    const written = await this.writeTerminal(launch, runId, effectivePhase)
+    if (!written.ok) {
+      // Terminal persistence failed, so the run can no longer be reported as its
+      // intended phase. Converge on FAILED — no later step may announce
+      // COMPLETE/BLOCKED/CANCELLED — then retry the write once: a transient
+      // storage failure must not leave the on-disk manifest non-terminal, which
+      // recovery would later misread as INTERRUPTED even though the runtime
+      // already knows this run failed.
       effectivePhase = 'FAILED'
-      effectiveMessage = `terminal manifest persistence failed: ${failureMessage(error)}`
+      effectiveMessage = `terminal manifest persistence failed: ${failureMessage(written.error)}`
+      const retry = await this.writeTerminal(launch, runId, effectivePhase)
+      if (!retry.ok) effectiveMessage = `${effectiveMessage}; retry failed: ${failureMessage(retry.error)}`
       try { launch.agent?.session?.append?.('planx/finalize-error', { runId, phase: effectivePhase, message: effectiveMessage, at }) } catch { /* containment: the run view is the last resort */ }
       try { this.failView(runId, 'FAILED', effectiveMessage, at) } catch { /* containment: never rethrow out of finalize */ }
     }
