@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto'
 
 export type ValidationStatus = 'PASS'|'FAIL'|'INCONCLUSIVE'|'UNSAFE_MUTATION'
+export interface ValidationSandboxFacts {
+  mode?: string
+  denied: boolean
+  enforcement?: string
+  runnerFailed?: boolean
+}
 export interface ValidationReceipt {
   schemaVersion: 1
   runId: string
@@ -14,6 +20,7 @@ export interface ValidationReceipt {
   status: ValidationStatus
   stdout: { path: string; sha256: string; bytes: number; truncated: boolean }
   stderr: { path: string; sha256: string; bytes: number; truncated: boolean }
+  sandbox?: ValidationSandboxFacts
   boundHead: string
   ownershipFingerprint: string
   complete: boolean
