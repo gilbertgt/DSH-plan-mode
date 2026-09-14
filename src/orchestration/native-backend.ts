@@ -10,6 +10,45 @@ import { installNativeMutatingChildSandbox } from './native-child-policy.ts'
 export type RoleExecutionResult=RoleResult&{__usage?:UsageSample}
 export interface NativeRunRequest{parent:any;role:'worker'|'integrator'|'reviewer';taskId:string;prompt:string;route:RouteChoice;signal:AbortSignal;persona?:string;toolFilter?:unknown;ownership?:{root:string;paths:string[]}}
 
+/** One delegated child turn, as this backend needs to observe it. */
+export interface NativeChildResult { stopReason?: unknown; structured?: unknown; diagnostic?: unknown; output?: unknown }
+export interface NativeSpawnRequest { label: string; prompt: string; parent: any; signal: AbortSignal; route: RouteChoice; outputSchema: unknown; toolFilter: unknown; persona?: string }
+export interface NativeSpawnHandle { result: Promise<NativeChildResult>; localAgent?: any; dispose(): Promise<void> }
+/** How a native role obtains a delegated child; the default is `ctx.subagents.start('spawn')`. */
+export type NativeSpawnFn = (request: NativeSpawnRequest) => Promise<NativeSpawnHandle>
+
+let nativeSpawn: NativeSpawnFn | undefined
+
+/**
+ * Replace how native roles delegate their child.
+ *
+ * The default is DSH's in-process `spawn` provider, which requires a live model
+ * provider. The production E2E lane must exercise the real ownership guard,
+ * sandbox policy, mutation detection and contract retry, and a model provider is
+ * the one input CI cannot legitimately supply; this seam keeps every other stage
+ * real instead of stubbing the backend. The returned disposer restores the
+ * default, and production callers never consult it.
+ */
+export function configureNativeSpawn(fn: NativeSpawnFn | undefined): () => void {
+  const previous = nativeSpawn
+  nativeSpawn = fn
+  return () => { nativeSpawn = previous }
+}
+
+function defaultNativeSpawn(ctx: any): NativeSpawnFn {
+  return async request => ctx.subagents.start('spawn', {
+    label: request.label,
+    prompt: [{ type: 'text', text: request.prompt }],
+    parent: request.parent,
+    signal: request.signal,
+    agentOptions: request.route,
+    outputSchema: request.outputSchema,
+    maxDepth: 1,
+    toolFilter: request.toolFilter,
+    persona: request.persona,
+  }) as Promise<NativeSpawnHandle>
+}
+
 const OWNERSHIP_SAFE_MUTATION_TOOLS = [
   'read','glob','grep','lsp','web_search','web_fetch',
   'write','write_file','edit','edit_file','delete','delete_file',
@@ -32,10 +71,54 @@ function isMaxTokensStop(reason: unknown): boolean {
   return String(reason ?? '').trim().toLowerCase().replaceAll('_', '-') === 'max-tokens'
 }
 
+/** The child's final assistant text, bounded, for embedding in a diagnostic. */
+function finalMessageExcerpt(result: any, limit = 400): string | undefined {
+  const text = (Array.isArray(result?.output) ? result.output : [])
+    .filter((block: any) => block?.type === 'text')
+    .map((block: any) => String(block.text ?? ''))
+    .join('')
+    .trim()
+  if (!text) return undefined
+  return text.length > limit ? `${text.slice(0, limit)}…` : text
+}
+
+/**
+ * A stop that is not `completed`.
+ *
+ * The reason alone is what DSH reports, and a bare `subagent X stopped: error`
+ * names neither cause nor fix. DSH also flattens a post-turn failure to
+ * `stopReason: 'error'` with no diagnostic, so this message additionally carries
+ * whatever the child actually said; without it the run's failure account is
+ * empty and the run cannot be diagnosed after the fact.
+ */
 function stopError(taskId: string, result: any): Error {
-  const error = new Error(`subagent ${taskId} stopped: ${result.stopReason}${result.diagnostic ? `: ${result.diagnostic}` : ''}`)
+  const excerpt = finalMessageExcerpt(result)
+  const error = new Error(
+    `subagent ${taskId} stopped: ${result.stopReason}`
+    + `${result.diagnostic ? `: ${result.diagnostic}` : ''}`
+    + `${!result.diagnostic && excerpt ? `; final message: ${excerpt}` : ''}`,
+  )
   ;(error as any).code = result.stopReason
   return error
+}
+
+/**
+ * Whether an attempt ended without the requested structured capture in a shape
+ * the one-shot retry may correct.
+ *
+ * DSH documents that `outputSchema` does not guarantee a capture, and it also
+ * reports a post-turn failure that lost the capture as `stopReason: 'error'`
+ * with an empty diagnostic — the exact shape the failed run 4429470e produced,
+ * where the child completed its turn after a successful `write` and never
+ * called the contract tool. Treating that as a transport stop surfaced the bare
+ * `subagent X stopped: error` and skipped the corrective retry that exists for
+ * this case, so both halves are accepted here. The retry gate still proves
+ * ownership before any corrective child starts.
+ */
+function contractlessStop(result: any): boolean {
+  if (result?.structured !== undefined) return false
+  const reason = String(result?.stopReason ?? '').trim().toLowerCase()
+  return reason === 'completed' || reason === 'error'
 }
 
 /**
@@ -59,6 +142,22 @@ function missingContractError(taskId: string, result: any): Error {
   const error = new Error(
     `subagent ${taskId} finished without returning the required structured completion contract`
     + `${result?.diagnostic ? ` (${result.diagnostic})` : ''}`
+    + `${excerpt ? `; final message: ${excerpt}` : '; it produced no final message either'}`,
+  )
+  ;(error as any).code = 'missing-contract'
+  return error
+}
+
+/**
+ * The final shape of a contractless `error` stop: the retry already ran, so the
+ * message must name both facts a reader needs — the contract was never captured
+ * and the turn ended in `error` — instead of the bare stop reason.
+ */
+function contractlessStopError(taskId: string, result: any): Error {
+  const excerpt = finalMessageExcerpt(result)
+  const error = new Error(
+    `subagent ${taskId} finished without returning the required structured completion contract`
+    + ` (stop reason: ${String(result?.stopReason ?? 'unknown')}; the turn ended abnormally before the contract was captured)`
     + `${excerpt ? `; final message: ${excerpt}` : '; it produced no final message either'}`,
   )
   ;(error as any).code = 'missing-contract'
@@ -201,16 +300,15 @@ export class NativeSpawnBackend{
             : retryReason==='missing-contract'
               ? missingContractContinuationPrompt(req.prompt)
               : maxTokensContinuationPrompt(req.prompt)
-          run=await this.ctx.subagents.start('spawn',{
+          run=await (nativeSpawn ?? defaultNativeSpawn(this.ctx))({
             label:`${req.role}:${req.taskId}${attempt===0?'':':continue'}`,
-            prompt:[{type:'text',text:prompt}],
+            prompt,
             parent:req.parent,
             signal,
             // Each retry gets its own call-scoped marker; the first marker was
             // consumed by the first child and must never be reused.
-            agentOptions:sandboxScope?sandboxScope.mark(req.route):req.route,
+            route:sandboxScope?sandboxScope.mark(req.route):req.route,
             outputSchema:ROLE_RESULT_SCHEMA,
-            maxDepth:1,
             toolFilter,
             persona:req.persona,
           })
@@ -229,11 +327,13 @@ export class NativeSpawnBackend{
             retryReason='max-tokens'
             continue
           }
-          if(result.stopReason!=='completed')throw stopError(req.taskId,result)
-          // A completed turn without a structured capture is not a provider fault:
-          // the child simply never called the contract tool. One corrective retry
-          // is safe under the same ownership proof the max-token lane uses, and it
-          // converts an opaque run failure into either success or a real diagnosis.
+          if(result.stopReason!=='completed'&&!contractlessStop(result))throw stopError(req.taskId,result)
+          // A turn that ended without a structured capture is not a provider
+          // fault: the child never called the contract tool (or DSH lost the
+          // capture and flattened the turn to `error`). One corrective retry is
+          // safe under the same ownership proof the max-token lane uses, and it
+          // converts an opaque run failure into either success or a real
+          // diagnosis.
           if(result.structured===undefined&&attempt===0&&req.ownership&&logicalBaseline){
             const current=await snapshotDirty(req.ownership.root)
             const changed=deltaPaths(logicalBaseline,current)
@@ -241,7 +341,9 @@ export class NativeSpawnBackend{
             retryReason='missing-contract'
             continue
           }
-          if(result.structured===undefined)throw missingContractError(req.taskId,result)
+          if(result.structured===undefined)throw result.stopReason==='completed'
+            ? missingContractError(req.taskId,result)
+            : contractlessStopError(req.taskId,result)
           const valid=validateRoleResult(result.structured,req.taskId)
           const usage=mergeNativeUsage(usageSamples,req.role,req.route)
           usage.durationMs=Date.now()-started
