@@ -115,12 +115,16 @@ test('concurrent lease creation does not corrupt the worktree registry', async (
       // Each lease is an independent clean checkout of the recorded head.
       assert.equal(await readFile(join(lease.path, 'a.ts'), 'utf8'), 'base-a\n')
     }
-    // The registry agrees with what was created. Git reports worktree paths with
-    // forward slashes even on Windows, so compare on a normalized form.
+    // The registry agrees with what was created. Comparing path literals is not
+    // portable — Windows reports the 8.3 short form (`RUNNER~1`) while the lease
+    // records the long path — so match on the unique lease key instead.
     const listed = (await git(root, ['worktree', 'list', '--porcelain'])).stdout.toString('utf8').replaceAll('\\', '/')
     for (const lease of leases) {
-      assert.ok(listed.includes(lease.path.replaceAll('\\', '/')), `${lease.taskId} must be registered`)
+      assert.ok(listed.includes(lease.taskId), `${lease.taskId} must be registered`)
     }
+    // `git worktree list` would also fail loudly if the registry were corrupt,
+    // which is the failure this test exists to catch.
+    assert.equal(listed.split('worktree ').length - 1, taskIds.length + 1, 'exactly the main tree plus every lease')
 
     await Promise.all(leases.map(lease => removeOwnedWorktree(root, lease, true)))
   } finally {
