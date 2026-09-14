@@ -81,12 +81,46 @@ export function sdkHarnessOptions(req: SdkRunRequest) {
   }
 }
 
+/** The one operation {@link SdkWorkspaceBackend} needs from a DSH harness. */
+export interface SdkHarness {
+  run(prompt: string): Promise<{ finalResponse: string; events: readonly unknown[] }>
+  close(): Promise<void>
+}
+
+/** Builds the harness for one run; the default is the real SDK client. */
+export type SdkHarnessFactory = (options: ReturnType<typeof sdkHarnessOptions>) => Promise<SdkHarness>
+
+let harnessFactory: SdkHarnessFactory | undefined
+
+/**
+ * Replace how the SDK lane obtains its harness.
+ *
+ * The default constructs the real `@deepseek-ai/dsh-sdk-client`, which needs a
+ * live model provider. The production E2E lane must exercise the real isolated
+ * worktree, patch capture, host validation, review and terminal report, and a
+ * model provider is the one input CI cannot legitimately supply; this seam lets
+ * that lane keep every other stage real instead of stubbing the whole backend.
+ * Same shape as {@link configureValidationShell} and the role-timeout resolver:
+ * an explicit module-level override, restorable by the returned disposer, never
+ * consulted by production callers.
+ */
+export function configureSdkHarnessFactory(factory: SdkHarnessFactory | undefined): () => void {
+  const previous = harnessFactory
+  harnessFactory = factory
+  return () => { harnessFactory = previous }
+}
+
+async function resolveHarness(options: ReturnType<typeof sdkHarnessOptions>): Promise<SdkHarness> {
+  if (harnessFactory) return harnessFactory(options)
+  const { DeepSeekHarness } = await import('@deepseek-ai/dsh-sdk-client')
+  return new DeepSeekHarness(options) as unknown as SdkHarness
+}
+
 export class SdkWorkspaceBackend {
   async run(req: SdkRunRequest): Promise<SdkRoleExecutionResult> {
     const signal = withRoleTimeout(req.cwd, req.signal)
     signal.throwIfAborted()
-    const { DeepSeekHarness } = await import('@deepseek-ai/dsh-sdk-client')
-    const harness = new DeepSeekHarness(sdkHarnessOptions(req))
+    const harness = await resolveHarness(sdkHarnessOptions(req))
     const started = Date.now()
     let abortClose: (() => void) | undefined
     const abortPromise = new Promise<never>((_, reject) => {

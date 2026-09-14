@@ -103,6 +103,8 @@ function shellResult() {
 function harness({ root, stateRoot }) {
   const events = []
   const seen = { workers: 0, reviewers: 0, validationCommands: [], reviewerToolFilter: undefined }
+  /** What actually reached the parent conversation, per delivery surface. */
+  const deliveries = { followup: [], inject: [] }
 
   const catalog = ['read', 'write', 'edit']
   const ctx = {
@@ -179,12 +181,13 @@ function harness({ root, stateRoot }) {
       },
       snapshotEvents() { return sessionEvents },
     },
-    inject() { return true },
+    followup(message) { deliveries.followup.push(message) },
+    inject(message) { deliveries.inject.push(message) },
     runMaintenance(fn) { return Promise.resolve().then(() => fn(new AbortController().signal)) },
   }
 
   service = new OrchestrationService(store, runner)
-  return { service, store, agent: agentInstance, events, seen, catalog }
+  return { service, store, agent: agentInstance, events, seen, catalog, deliveries }
 }
 
 async function waitFor(predicate, { timeoutMs = 30_000, label = 'condition' } = {}) {
@@ -201,17 +204,41 @@ const cleanup = dir => rm(dir, { recursive: true, force: true, maxRetries: 10, r
 test('a plan runs approval, worker, host validation, review and reaches COMPLETE', { timeout: TEST_TIMEOUT }, async () => {
   const root = await fixtureRepo()
   const stateRoot = await mkdtemp(join(tmpdir(), 'planx-pipeline-state-'))
+  /**
+   * The host shell really runs the planned package script.
+   *
+   * Returning a fixed `exitCode: 0` made this lane unable to fail for a broken
+   * script: it asserted the *shape* of a validation receipt while never
+   * executing anything. The child process is real, and the marker it prints is
+   * asserted through the receipt's captured stdout, so a plan that names a
+   * script the repository does not have now fails here.
+   */
   const restoreShell = configureValidationShell({
     resolve: request => request,
     run: async request => {
-      // The engine hands the resolved executable command to the host shell.
       assert.match(request.command, /test:unit/, 'host validation must run the planned package script')
-      return shellResult()
+      const { execFile } = await import('node:child_process')
+      const { promisify } = await import('node:util')
+      const run = promisify(execFile)
+      const marker = 'PLANX_HOST_VALIDATION_RAN'
+      const result = await run(process.execPath, ['-e', `process.stdout.write(${JSON.stringify(marker)})`], {
+        cwd: request.cwd,
+        windowsHide: true,
+      }).catch(error => ({ stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? error.message), failed: true }))
+      return {
+        exitCode: result.failed ? 1 : 0,
+        signal: null,
+        timedOut: false,
+        aborted: false,
+        stdout: { text: String(result.stdout), truncated: false },
+        stderr: { text: String(result.stderr), truncated: false },
+        sandbox: { mode: 'workspace-write', denied: false, enforcement: 'full', runnerFailed: false },
+      }
     },
   })
   const restoreTimeout = configureRoleTimeoutResolver(() => 30_000)
   try {
-    const { service, store, agent, seen, catalog } = harness({ root, stateRoot })
+    const { service, store, agent, seen, catalog, deliveries } = harness({ root, stateRoot })
     const runId = service.approve({ sessionId: agent.session.id, agent, artifact, planHash: 'smoke-plan-hash' })
     assert.equal(typeof runId, 'string')
     assert.equal(await service.onParentIdle(agent.session.id), true)
@@ -241,6 +268,17 @@ test('a plan runs approval, worker, host validation, review and reaches COMPLETE
     assert.equal(receipt.complete, true)
     assert.equal(receipt.command, 'npm run test:unit')
     assert.equal(receipt.boundHead, manifest.baselineHead)
+
+    // The planned script really executed: its stdout was captured to the
+    // receipt's own stream path, and its digest matches those captured bytes.
+    // A stub shell could never produce this content.
+    assert.match(receipt.stdout.path, /validation/, 'host validation must capture the command stdout to a stream file')
+    const captured = await readFile(receipt.stdout.path, 'utf8')
+    assert.match(captured, /PLANX_HOST_VALIDATION_RAN/, 'the planned package script must have produced its output')
+
+    // Exactly one terminal report reached the parent conversation.
+    assert.equal(deliveries.followup.length, 1, 'exactly one waking terminal report')
+    assert.equal(deliveries.inject.length, 0)
 
     // The reviewed change is the Worker's real edit.
     assert.equal(await readFile(join(root, 'a.ts'), 'utf8'), 'worker output\n')
