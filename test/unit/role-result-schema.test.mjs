@@ -25,12 +25,11 @@ test('structural violations still fail closed', () => {
   const longTaskId = 't'.repeat(201)
   assert.throws(() => validateRoleResult(baseResult(longTaskId), longTaskId), /taskId mismatch/)
 
-  // Ownership paths are asserted against the host diff, so count and type stay
-  // strict; an over-long single path is clipped like other text.
+  // Ownership paths are security-relevant identifiers, not diagnostics: count,
+  // type, and length all remain fail-closed rather than being rewritten.
   assert.throws(() => validateRoleResult({ ...baseResult(), changed: Array(201).fill('x') }, 'task-1'), /changed invalid/)
   assert.throws(() => validateRoleResult({ ...baseResult(), changed: [7] }, 'task-1'), /changed invalid/)
-  const clippedPath = validateRoleResult({ ...baseResult(), changed: ['x'.repeat(513)] }, 'task-1')
-  assert.match(clippedPath.changed[0], /truncated by host\]$/)
+  assert.throws(() => validateRoleResult({ ...baseResult(), changed: ['x'.repeat(513)] }, 'task-1'), /changed invalid/)
 
   assert.throws(() => validateRoleResult({ ...baseResult(), validation: Array.from({ length: 31 }, (_, i) => ({ id: `v-${i}`, status: 'PASS' })) }, 'task-1'), /validation invalid/)
   assert.throws(() => validateRoleResult({ ...baseResult(), validation: [{ id: 'x'.repeat(201), status: 'PASS' }] }, 'task-1'), /validation invalid/)
@@ -80,7 +79,13 @@ test('long validation detail is clipped, not rejected', () => {
   assert.match(result.validation[0].detail, /truncated by host\]$/)
 })
 
-test('the 128KiB envelope remains the fail-closed bound on payload size', () => {
+test('the raw 128KiB envelope remains fail-closed before diagnostic clipping', () => {
+  assert.throws(
+    () => validateRoleResult({ ...baseResult(), remaining: ['x'.repeat(129 * 1024)] }, 'task-1'),
+    /exceeds 128KiB/,
+    'one huge diagnostic must not become acceptable merely because normalization could clip it',
+  )
+
   const oversized = {
     ...baseResult(),
     changed: Array(200).fill('x'.repeat(512)),

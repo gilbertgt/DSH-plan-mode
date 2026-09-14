@@ -44,22 +44,25 @@ const DIAGNOSTIC_MAX_CHARS = 4000
  * @throws when the value is not an array, exceeds `maxItems`, or holds a
  * non-string element — structural violations, never mere length.
  */
-function boundedStrings(value:unknown,name:string,maxItems:number,maxChars:number):string[]{
+function boundedStrings(value:unknown,name:string,maxItems:number,maxChars:number,truncate=false):string[]{
   if(!Array.isArray(value)||value.length>maxItems)throw new Error(`${name} invalid`)
   return value.map(item=>{
-    if(typeof item!=='string')throw new Error(`${name} invalid`)
-    return item.length>maxChars?`${item.slice(0,maxChars)}${TRUNCATION_MARKER}`:item
+    if(typeof item!=='string'||(!truncate&&item.length>maxChars))throw new Error(`${name} invalid`)
+    return truncate&&item.length>maxChars?`${item.slice(0,maxChars)}${TRUNCATION_MARKER}`:item
   })
 }
 
 export function validateRoleResult(value:unknown, taskId:string): RoleResult {
   if (!value || typeof value!=='object' || Array.isArray(value)) throw new Error('role result must be an object')
   const x=value as Record<string,unknown>;const unknown=Object.keys(x).filter(k=>!KEYS.has(k));if(unknown.length)throw new Error(`role result unknown fields: ${unknown.join(', ')}`)
+  let rawEncoded:string
+  try{rawEncoded=JSON.stringify(value)}catch{throw new Error('role result must be JSON-serializable')}
+  if(Buffer.byteLength(rawEncoded,'utf8')>128*1024)throw new Error('role result exceeds 128KiB')
   if(x.taskId!==taskId||typeof x.taskId!=='string'||x.taskId.length>200) throw new Error('role taskId mismatch')
   if(!['COMPLETE','BLOCKED','FAILED'].includes(String(x.status))) throw new Error('role status invalid')
   const changed=boundedStrings(x.changed,'changed',200,512)
-  const remaining=boundedStrings(x.remaining,'remaining',30,DIAGNOSTIC_MAX_CHARS)
-  const contextExpansion=boundedStrings(x.contextExpansion,'contextExpansion',30,DIAGNOSTIC_MAX_CHARS)
+  const remaining=boundedStrings(x.remaining,'remaining',30,DIAGNOSTIC_MAX_CHARS,true)
+  const contextExpansion=boundedStrings(x.contextExpansion,'contextExpansion',30,DIAGNOSTIC_MAX_CHARS,true)
   if(!Array.isArray(x.validation)||x.validation.length>30)throw new Error('validation invalid')
   const validation:RoleValidation[]=x.validation.map(item=>{
     if(!item||typeof item!=='object'||Array.isArray(item))throw new Error('validation invalid')

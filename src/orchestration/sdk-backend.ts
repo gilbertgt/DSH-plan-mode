@@ -50,6 +50,22 @@ function packagedProfilePath(role: 'worker'|'reviewer'): string {
   return join(root, 'profiles', `${role}.cordis.yml`)
 }
 
+/**
+ * Whether a failure means the SDK lane itself is unusable, rather than the task
+ * having gone wrong.
+ *
+ * An incomplete or missing DSH profile, a client module that cannot be
+ * imported, and a harness that dies before reporting are environment facts this
+ * run cannot repair — the documented failure being `dsh profile "sdk": JSON-RPC
+ * input closed` with an `ERR_MODULE_NOT_FOUND` cause. A Worker that returns
+ * BLOCKED, escapes ownership, or fails validation is a task fact and must never
+ * be excused by this classification.
+ */
+export function sdkLaneUnavailable(error: unknown): boolean {
+  const text = `${(error as any)?.code ?? ''} ${(error as any)?.message ?? error ?? ''}`
+  return /ERR_MODULE_NOT_FOUND|Cannot find package ['"]@deepseek-ai\/dsh-|dsh profile .*JSON-RPC input closed|failed to import loader entry|dsh profile .* not found|dsh profile .* unavailable/i.test(text)
+}
+
 export function sdkHarnessOptions(req: SdkRunRequest) {
   const patches = req.patches ?? [packagedProfilePath(req.role ?? 'worker')]
   return {

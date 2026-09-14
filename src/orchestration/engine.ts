@@ -12,8 +12,8 @@ import { capturePatch, type PatchArtifact } from '../git/patches.ts'
 import { applyPatchArtifact, integratorPrompt, needsIntegrator } from './integrator.ts'
 import { buildWaves, recheckWave, type ExecutionWave } from './scheduler.ts'
 import { buildTaskPacket } from './task-packet.ts'
-import { NativeSpawnBackend, type RoleExecutionResult } from './native-backend.ts'
-import { SdkWorkspaceBackend, type SdkRoleExecutionResult } from './sdk-backend.ts'
+import { NativeSpawnBackend, resolveReviewerToolAllow, type RoleExecutionResult } from './native-backend.ts'
+import { SdkWorkspaceBackend, sdkLaneUnavailable, type SdkRoleExecutionResult } from './sdk-backend.ts'
 import { routeChoices, preflightRoute } from './role-router.ts'
 import { eligibleTransportFailure } from './failover.ts'
 import { runValidation } from '../validation/runner.ts'
@@ -36,6 +36,35 @@ interface WorkerOutcome { task: PlanTask; result: MutationResult; changed: strin
 interface WorktreeRecord { taskId: string; path: string; baseHead: string; status: 'ACTIVE'|'CAPTURED'|'FAILED'|'CLEANED'; fingerprint?: string; patchSha256?: string }
 
 const unionOwnership = (plan: PlanArtifact): string[] => [...new Set(plan.tasks.flatMap(task => task.modify))].sort()
+
+/** Render any thrown value as a bounded, human-readable diagnostic string. */
+function describeFailure(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message
+  if (typeof error === 'string' && error) return error
+  try {
+    const encoded = JSON.stringify(error)
+    if (encoded && encoded !== '{}' && encoded !== 'null') return encoded
+  } catch { /* fall through to the generic label */ }
+  return 'unknown failure'
+}
+
+export type SdkWaveSettlement<T> =
+  | { kind: 'complete'; outcomes: T[] }
+  | { kind: 'unavailable'; error: unknown }
+
+/**
+ * Drain every isolated SDK worker before deciding whether to fall back.
+ * A task/ownership failure always wins over an environment-only lane failure;
+ * serial work must never start while a sibling SDK worker is still running.
+ */
+export async function settleSdkWave<T>(promises: Promise<T>[]): Promise<SdkWaveSettlement<T>> {
+  const settled = await Promise.allSettled(promises)
+  const failures = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected')
+  const taskFailure = failures.find(item => !sdkLaneUnavailable(item.reason))
+  if (taskFailure) throw taskFailure.reason
+  if (failures.length > 0) return { kind: 'unavailable', error: failures[0]!.reason }
+  return { kind: 'complete', outcomes: settled.map(item => (item as PromiseFulfilledResult<T>).value) }
+}
 /**
  * Absent route fields must not exist at all. An explicit `reasoningEffort:
  * undefined` is rejected by every DSH lossless-JSON boundary (subagent
@@ -176,6 +205,12 @@ async function nativeReviewer(
   label: string,
 ): Promise<{ text: string; usage: UsageSample }> {
   let last: unknown
+  // Resolve the read-only capability allow-list against the real parent
+  // catalog once. DSH's `tools.restrict()` rejects a name the child cannot
+  // inherit — a profile without an LSP service has no `lsp` tool — and that
+  // throw aborts the whole run before any review happens. Only capabilities
+  // this composition actually registers are named.
+  const toolFilter = { allow: resolveReviewerToolAllow(ctx, parent) }
   for (let index = 0; index < routes.length; index++) {
     const route = routes[index]!
     const started = Date.now()
@@ -189,7 +224,7 @@ async function nativeReviewer(
         maxDepth: 1,
         // Allow-list instead of deny-list: unknown third-party mutation tools do
         // not become visible merely because we failed to name them.
-        toolFilter: { allow: ['read', 'glob', 'grep', 'lsp', 'web_search', 'web_fetch'] },
+        toolFilter,
         persona: 'Independent Reviewer. Strictly read-only. Review host evidence and current files; never mutate repository or external state.',
       })
       try {
@@ -426,10 +461,31 @@ export function createOrchestratorRunner(deps: EngineDeps) {
         const priorRunDelta = deltaPaths(runBaseline, mainBefore)
         assertOwnedPaths(priorRunDelta, allOwned)
         const seedPatch = priorRunDelta.length > 0 ? await capturePatch(root, head, '__wave_seed__', priorRunDelta) : undefined
-        const outcomes = await Promise.all(waveTasks.map(task => executeWorktreeTask(
+
+        // Drain the complete isolated wave before deciding whether to retry it
+        // serially, so fallback never overlaps a sibling SDK worker.
+        const waveSettlement = await settleSdkWave(waveTasks.map(task => executeWorktreeTask(
           deps, launch, runId, leaseRunId, runDir, root, head, task, plan,
           workerRoutes, signal, handoffs, usage, worktreeRecords, seedPatch,
         )))
+        if (waveSettlement.kind === 'unavailable') {
+          deps.emit?.('phase', {
+            runId,
+            sessionId: launch.sessionId,
+            phase: 'WORKERS',
+            message: `parallel SDK lane unavailable; retrying this wave serially (${describeFailure(waveSettlement.error).slice(0, 300)})`,
+          })
+          for (const task of waveTasks) {
+            const outcome = await executeSerialTask(deps, launch, task, plan, root, workerRoutes, signal, handoffs, usage)
+            handoffs.push(`${task.id}: host-observed=${outcome.changed.join(',') || '(none)'} status=${outcome.result.status}`)
+            completed.add(task.id)
+            deps.emit?.('task-end', { runId, taskId: task.id, status: outcome.result.status })
+            await atomicJson(handoffPath, handoffs)
+            await updateCheckpoint(store, launch, runId, root, head, allOwned, 'WORKERS', { completedTaskIds: [...completed], safeBoundary: true })
+          }
+          continue
+        }
+        const outcomes = waveSettlement.outcomes
 
         const mainAfterWorkers = await snapshotDirty(root)
         if (snapshotHash(mainAfterWorkers) !== snapshotHash(mainBefore)) {
