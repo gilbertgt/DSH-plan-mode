@@ -13,6 +13,17 @@ test('Plan OFF and disabled states add zero planner contract text', () => {
   assert.ok(COMPACT_PLANNER_REMINDER.length < PLANNER_POLICY.length / 4)
 })
 
+test('planner orders clean-worktree validation producer before consumer', () => {
+  assert.match(PLANNER_POLICY, /fresh detached worktree/)
+  assert.match(PLANNER_POLICY, /Ignored, untracked, and generated artifacts from the originating workspace are absent/)
+  assert.match(PLANNER_POLICY, /producer-before-consumer/)
+  assert.match(PLANNER_POLICY, /package manager that owns the checked-in lockfile/)
+  assert.match(PLANNER_POLICY, /implicit pre\/post lifecycle hook/)
+  assert.match(PLANNER_POLICY, /consumer script explicitly produces its own prerequisites/)
+  assert.match(PLANNER_POLICY, /tracked or non-ignored mutation fails validation/)
+  assert.match(COMPACT_PLANNER_REMINDER, /clean-worktree producer-before-consumer/)
+})
+
 test('planner settings are runtime policy inputs rather than dead UI state',()=>{
   const planning={...structuredClone(DEFAULT_SETTINGS.planning),adaptiveResearch:false,maxInitialReadFiles:3,softInputTokens:12345,progressiveDiscovery:false,requireExpansionReason:true}
   const text=plannerPolicyText(true,true,true,planning)
