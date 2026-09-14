@@ -36,10 +36,16 @@ async function validation(d,runDir,id,shell=fakeShell(),command='npm test',timeo
   return runValidation({cwd:d,runDir,runId:'r1',phase:'VALIDATING',commandId:id,command,timeoutMs,capBytes,shell,...(launcher?{launcher}:{})})
 }
 /** An injectable launcher probe, so Windows launcher selection is asserted
- * identically on a POSIX CI host and never depends on an installed toolchain. */
+ * identically on a POSIX CI host and never depends on an installed toolchain.
+ *
+ * `exists` is injected alongside `probe`: the npm branch resolves its CLI
+ * through a real filesystem check of the Node installation, which on a POSIX
+ * host points at a Windows path that does not exist. Without this the npm case
+ * silently fell back to `npm.cmd` and the test failed for a reason that has
+ * nothing to do with launcher selection. */
 function windowsLaunchers(...executables){
   const present=new Set(executables)
-  return {platform:'win32',probe:name=>present.has(name)}
+  return {platform:'win32',probe:name=>present.has(name),exists:()=>true}
 }
 
 test('sandboxed host validation distinguishes pass/fail/unsafe mutation/timeout and detects tampering',async()=>{

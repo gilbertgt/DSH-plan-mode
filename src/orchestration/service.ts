@@ -224,8 +224,7 @@ export class OrchestrationService {
     view.updatedAt = now
   }
 
-  async cancel(runId: string, reason = 'user requested stop'): Promise<boolean> {
-    const view = this.#views.get(runId)
+  async cancel(runId: string, reason = 'user requested stop'): Promise<boolean> {    const view = this.#views.get(runId)
     if (!view) return false
     const sessionId = view.sessionId
     const pending = this.#pending.get(sessionId)
@@ -570,7 +569,19 @@ export class OrchestrationService {
         at,
       })
     } catch { /* the manifest already records the terminal phase */ }
+    // The run is finished the moment its terminal state is durable, so release
+    // the active-run bookkeeping here instead of waiting for `runMaintenance` to
+    // unwind. Delivery below is I/O: leaving the run registered across it made
+    // `activeRun()` report a live run for a run that had already ended, which is
+    // what the PREFLIGHT fail-closed test caught on Windows.
+    this.#releaseActive(launch.sessionId, runId)
     await this.deliverReport(launch, runId, effectivePhase, effectiveMessage)
+  }
+
+  /** Idempotently clear the active-run bookkeeping for one finished run. */
+  #releaseActive(sessionId: string, runId: string): void {
+    if (this.#activeRun.get(sessionId) === runId) this.#activeRun.delete(sessionId)
+    this.#controllers.delete(runId)
   }
 
   /**
