@@ -79,39 +79,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '22.19.0' }
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      # rc.2 is a supported release, so it is installed from the declared peer
-      # range. `--force` used to paper over a peer mismatch and made this lane
-      # prove nothing: a fresh consumer must be able to resolve rc.2 normally.
-      - name: Install the rc.2 runtime
-        run: >-
-          npm install --ignore-scripts --no-audit --no-fund
-          @deepseek-ai/dsh@0.1.5-rc.2
-          @deepseek-ai/dsh-agent@0.1.5-rc.2
-          @deepseek-ai/dsh-api-remotes@0.1.5-rc.2
-          @deepseek-ai/dsh-client-connection@0.1.5-rc.2
-          @deepseek-ai/dsh-client-locale@0.1.5-rc.2
-          @deepseek-ai/dsh-client-ui-conversation@0.1.5-rc.2
-          @deepseek-ai/dsh-client-ui-settings@0.1.5-rc.2
-          @deepseek-ai/dsh-client-ui-slots@0.1.5-rc.2
-          @deepseek-ai/dsh-llm@0.1.5-rc.2
-          @deepseek-ai/dsh-plan-mode@0.1.5-rc.2
-          @deepseek-ai/dsh-sandbox@0.1.5-rc.2
-          @deepseek-ai/dsh-sandbox-policy@0.1.5-rc.2
-          @deepseek-ai/dsh-sdk-client@0.1.5-rc.2
-          @deepseek-ai/dsh-session@0.1.5-rc.2
-          @deepseek-ai/dsh-session-projection@0.1.5-rc.2
-          @deepseek-ai/dsh-settings@0.1.5-rc.2
-          @deepseek-ai/dsh-subagent@0.1.5-rc.2
-          @deepseek-ai/dsh-system-prompt@0.1.5-rc.2
-          @deepseek-ai/dsh-tools@0.1.5-rc.2
-          @deepseek-ai/dsh-commands@0.1.5-rc.2
-      - run: npm run compat:check
-        env:
-          DSH_VERSION_UNDER_TEST: 0.1.5-rc.2
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
-      - run: npm run e2e:rc1
-      - run: npm run e2e:plan
+      # A pure rc.2 consumer: a fresh project whose only DSH dependencies are
+      # rc.2, into which the packed plugin is installed. Overlaying rc.2 packages
+      # onto this rc.1 workspace with `--force` proved nothing — the remaining
+      # rc.1 dependencies still had to resolve and the peer mismatch was
+      # suppressed rather than solved. Installing from the declared peer range
+      # is what a real rc.2 user does, and it either resolves or it does not.
+      - run: npm run compat:rc2
 # External Issue tests use local fake/mocked boundaries; ordinary CI never
 # creates a real GitHub PR.

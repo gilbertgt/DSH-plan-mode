@@ -1,8 +1,12 @@
 import { createHash } from 'node:crypto'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, rm, stat } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import { git, changedPaths } from './repository.ts'
 import { confined, stateRoot } from '../recovery/store.ts'
+
+async function exists(path: string): Promise<boolean> {
+  try { await stat(path); return true } catch { return false }
+}
 
 export interface WorktreeLease{path:string;runId:string;taskId:string;baseHead:string}
 
@@ -17,6 +21,27 @@ function safeSegment(value:string):string{
 export function worktreeRunKey(runId:string):string{
   const match=/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:-|$)/i.exec(runId)
   return safeSegment(match?.[1]??runId)
+}
+
+/**
+ * Serialize worktree mutations per repository.
+ *
+ * `git worktree add`, `remove` and `prune` all rewrite `.git/worktrees/`, and a
+ * parallel wave starts its tasks concurrently. Interleaving them corrupts the
+ * registration directory — observed on Windows as
+ * `failed to read .git/worktrees/<id>/commondir` while a sibling's `add` was in
+ * flight. The queue makes each mutation atomic against its siblings; the
+ * throughput cost is irrelevant next to a checkout that cannot be created.
+ */
+const worktreeQueues = new Map<string, Promise<unknown>>()
+
+function serializeWorktreeMutation<T>(repo: string, operation: () => Promise<T>): Promise<T> {
+  const key = resolve(repo)
+  const previous = worktreeQueues.get(key) ?? Promise.resolve()
+  const next = previous.then(operation, operation)
+  // Keep the chain alive but never let a rejection poison the next waiter.
+  worktreeQueues.set(key, next.then(() => undefined, () => undefined))
+  return next
 }
 
 /**
@@ -38,14 +63,19 @@ export async function createWorktree(repo:string,runId:string,taskId:string,head
   const leaseKey=safeSegment(`${runId}--${taskId}`)
   const path=confined(root,'worktrees',runKey,leaseKey)
   await mkdir(join(path,'..'),{recursive:true})
-  await releaseStaleLease(repo,path)
-  await git(repo,['worktree','add','--detach',path,head])
+  await serializeWorktreeMutation(repo, async () => {
+    // Only a lease that is actually present needs reclaiming: an unconditional
+    // `prune` on every creation adds registration churn that concurrent siblings
+    // then race against.
+    if (await exists(path)) await releaseStaleLease(repo,path)
+    await git(repo,['worktree','add','--detach',path,head])
+  })
   // A lease that is not clean at creation would report every tracked path as a
   // run-owned change, so the Worker would see a fabricated dirty tree and the
   // patch capture would attribute files the Worker never touched.
   const dirty=await changedPaths(path)
   if(dirty.length>0){
-    await releaseStaleLease(repo,path)
+    await serializeWorktreeMutation(repo, () => releaseStaleLease(repo,path))
     throw new Error(`fresh worktree lease is not clean at ${path}: ${dirty.slice(0,5).join(', ')}${dirty.length>5?`, +${dirty.length-5} more`:''}`)
   }
   return{path,runId:runKey,taskId,baseHead:head}

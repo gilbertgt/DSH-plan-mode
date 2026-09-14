@@ -49,6 +49,7 @@
     "build": "tsdown --config tsdown.config.mjs",
     "pack:check": "node scripts/pack-check.mjs",
     "compat:check": "node scripts/compatibility.mjs",
+    "compat:rc2": "node scripts/compat-rc2.mjs",
     "check": "npm test && npm run typecheck && npm run build && npm run pack:check && npm run compat:check && npm run e2e:plan",
     "e2e:rc1": "node scripts/e2e-rc1.mjs",
     "e2e:plan": "node --experimental-strip-types scripts/e2e-plan-run.mjs",

@@ -94,6 +94,42 @@ test('a patch refuses to overwrite an owned file the user changed after the host
 })
 
 /**
+ * A parallel wave creates its leases concurrently, and `git worktree add`
+ * rewrites `.git/worktrees/` for each one. Interleaving them corrupted the
+ * registration directory — on Windows the sibling saw
+ * `failed to read .git/worktrees/<id>/commondir` and the whole wave failed.
+ */
+test('concurrent lease creation does not corrupt the worktree registry', async () => {
+  const root = await repo()
+  const state = await mkdtemp(join(tmpdir(), 'planx-parallel-concurrent-'))
+  try {
+    const head = await fullHead(root)
+    const taskIds = ['t1', 't2', 't3', 't4']
+    const leases = await Promise.all(
+      taskIds.map(taskId => createWorktree(root, `${RUN}-worktrees`, taskId, head, state)),
+    )
+
+    assert.equal(leases.length, taskIds.length)
+    for (const [index, lease] of leases.entries()) {
+      assert.equal((await stat(lease.path)).isDirectory(), true, `${taskIds[index]} lease must exist`)
+      // Each lease is an independent clean checkout of the recorded head.
+      assert.equal(await readFile(join(lease.path, 'a.ts'), 'utf8'), 'base-a\n')
+    }
+    // The registry agrees with what was created. Git reports worktree paths with
+    // forward slashes even on Windows, so compare on a normalized form.
+    const listed = (await git(root, ['worktree', 'list', '--porcelain'])).stdout.toString('utf8').replaceAll('\\', '/')
+    for (const lease of leases) {
+      assert.ok(listed.includes(lease.path.replaceAll('\\', '/')), `${lease.taskId} must be registered`)
+    }
+
+    await Promise.all(leases.map(lease => removeOwnedWorktree(root, lease, true)))
+  } finally {
+    await cleanup(root)
+    await cleanup(state)
+  }
+})
+
+/**
  * Two tasks in one wave must both land. The shared `worktrees.json` writer is
  * serialized so a slower writer cannot revert a sibling's newer status.
  */
