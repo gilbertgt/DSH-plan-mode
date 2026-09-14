@@ -32,6 +32,45 @@ function strictKeys(value: Record<string, unknown>, allowed:Set<string>, where:s
 }
 
 /**
+ * A Worker is a leaf file editor with no shell, package-manager, or process
+ * execution tool and no write access outside the repository. A task whose
+ * required changes demand one of those can only end in a BLOCKED Worker, which
+ * terminates the entire run. Catching that at plan-validation time converts a
+ * mid-run failure into an actionable plan defect. See PLANNER_POLICY's "Worker
+ * capability boundary" section — this is the enforcing counterpart, because a
+ * prompt alone is not a guarantee.
+ */
+const EXECUTION_INSTRUCTION = /\b(?:npm|pnpm|yarn|bun|npx|node|python|python3|pip|pwsh|powershell|bash|sh|cmd|git|tsc|vitest|jest|make|cargo|go|docker|kubectl)\b/i
+/** An instruction that actually tells the reader to run something, not a bare mention. */
+const RUN_VERB = /\b(?:run|runs|running|execute|executes|executing|invoke|invokes|invoking|launch|launches|launching|install|installs|installing|build|builds|building|compile|compiles|compiling|copy|copies|copying|deploy|deploys|deploying|publish|publishes|publishing)\b/i
+/**
+ * A build/test/install/deploy imperative whose object is named only
+ * generically ("the build script", "the test suite"), which still asks for a
+ * command execution a Worker cannot perform.
+ */
+const GENERIC_EXECUTION_OBJECT = /\b(?:script|scripts|command|commands|build|bundle|tests?|suite|runner|linter|installer|ci|pipeline|deploy(?:ment)?|artifact|artifacts|bundle)\b/i
+/** An absolute Windows, POSIX-home, or UNC path, which no owned path may be. */
+const OUTSIDE_REPO_PATH = /(?:[A-Za-z]:[\\/]|(?:^|[\s"'(])\/(?:Users|home|var|etc|opt|usr|tmp|mnt)\/|\\\\)/
+
+/**
+ * Reject a task instruction that a leaf Worker provably cannot execute.
+ *
+ * Matching is deliberately narrow so descriptive prose such as "the npm
+ * package name" or "documented in README" stays legitimate, while "run npm run
+ * build", "execute the build script", and "copy lib/client.js to
+ * C:\...\node_modules" are rejected.
+ */
+function assertWorkerExecutableTask(field:string, value:string) {
+  if (OUTSIDE_REPO_PATH.test(value)) {
+    throw new Error(`${field} must not reference a path outside the repository: a leaf Worker cannot write there`)
+  }
+  if (!RUN_VERB.test(value)) return
+  if (EXECUTION_INSTRUCTION.test(value) || GENERIC_EXECUTION_OBJECT.test(value)) {
+    throw new Error(`${field} must not instruct a leaf Worker to execute a program: state the source-level change instead`)
+  }
+}
+
+/**
  * Validation is intentionally not an arbitrary shell surface. The Planner may
  * select an existing project package script, but it cannot inject redirection,
  * pipes, command substitution, inline interpreters, download-and-execute tools,
@@ -101,7 +140,14 @@ export function validatePlanArtifact(input:unknown, requireExplicitOwnership=tru
     if (new Set(modify).size !== modify.length) throw new Error(`tasks[${i}].modify contains duplicates`)
     const acceptanceCriteria = stringArray(t.acceptanceCriteria,`tasks[${i}].acceptanceCriteria`); if (!acceptanceCriteria.length) throw new Error(`tasks[${i}].acceptanceCriteria must be non-empty`)
     if (typeof t.parallelSafe !== 'boolean') throw new Error(`tasks[${i}].parallelSafe must be boolean`)
-    return { id:t.id as string,title:t.title as string,objective:t.objective as string,read,modify,decisionLocks:stringArray(t.decisionLocks,`tasks[${i}].decisionLocks`),requiredChanges:stringArray(t.requiredChanges,`tasks[${i}].requiredChanges`),acceptanceCriteria,validation:stringArray(t.validation,`tasks[${i}].validation`),dependsOn:stringArray(t.dependsOn,`tasks[${i}].dependsOn`),parallelSafe:t.parallelSafe }
+    const requiredChanges = stringArray(t.requiredChanges,`tasks[${i}].requiredChanges`)
+    // Fail closed on work a leaf Worker cannot perform. Without this check the
+    // run reaches the Worker, the Worker answers BLOCKED, and the whole
+    // orchestration stops at PREFLIGHT with no usable plan defect report.
+    assertWorkerExecutableTask(`tasks[${i}].objective`, t.objective as string)
+    for (const [j, change] of requiredChanges.entries()) assertWorkerExecutableTask(`tasks[${i}].requiredChanges[${j}]`, change)
+    for (const [j, criterion] of acceptanceCriteria.entries()) assertWorkerExecutableTask(`tasks[${i}].acceptanceCriteria[${j}]`, criterion)
+    return { id:t.id as string,title:t.title as string,objective:t.objective as string,read,modify,decisionLocks:stringArray(t.decisionLocks,`tasks[${i}].decisionLocks`),requiredChanges,acceptanceCriteria,validation:stringArray(t.validation,`tasks[${i}].validation`),dependsOn:stringArray(t.dependsOn,`tasks[${i}].dependsOn`),parallelSafe:t.parallelSafe }
   })
   for (const t of tasks) for (const dep of t.dependsOn) if (!ids.has(dep) || dep === t.id) throw new Error(`task ${t.id} has invalid dependency ${dep}`)
   assertAcyclic(tasks)
