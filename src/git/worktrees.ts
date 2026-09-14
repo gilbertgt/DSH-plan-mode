@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { mkdir, rm } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
-import { git } from './repository.ts'
+import { git, changedPaths } from './repository.ts'
 import { confined, stateRoot } from '../recovery/store.ts'
 
 export interface WorktreeLease{path:string;runId:string;taskId:string;baseHead:string}
@@ -19,12 +19,35 @@ export function worktreeRunKey(runId:string):string{
   return safeSegment(match?.[1]??runId)
 }
 
+/**
+ * Release a lease path left behind by a crashed run.
+ *
+ * A resumed run reuses the deterministic lease path, so a worktree that
+ * survived the crash makes the next `git worktree add` fail on an existing
+ * directory — the run could never be resumed. Removing the stale registration
+ * and the directory first is what makes resume actually reachable.
+ */
+async function releaseStaleLease(repo:string,path:string):Promise<void>{
+  await git(repo,['worktree','remove','--force',path]).catch(()=>{})
+  await rm(path,{recursive:true,force:true}).catch(()=>{})
+  await git(repo,['worktree','prune']).catch(()=>{})
+}
+
 export async function createWorktree(repo:string,runId:string,taskId:string,head:string,root=stateRoot()):Promise<WorktreeLease>{
   const runKey=worktreeRunKey(runId)
   const leaseKey=safeSegment(`${runId}--${taskId}`)
   const path=confined(root,'worktrees',runKey,leaseKey)
   await mkdir(join(path,'..'),{recursive:true})
+  await releaseStaleLease(repo,path)
   await git(repo,['worktree','add','--detach',path,head])
+  // A lease that is not clean at creation would report every tracked path as a
+  // run-owned change, so the Worker would see a fabricated dirty tree and the
+  // patch capture would attribute files the Worker never touched.
+  const dirty=await changedPaths(path)
+  if(dirty.length>0){
+    await releaseStaleLease(repo,path)
+    throw new Error(`fresh worktree lease is not clean at ${path}: ${dirty.slice(0,5).join(', ')}${dirty.length>5?`, +${dirty.length-5} more`:''}`)
+  }
   return{path,runId:runKey,taskId,baseHead:head}
 }
 
