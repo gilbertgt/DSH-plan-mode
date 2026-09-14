@@ -1,9 +1,8 @@
 {
-  "latestTested": "0.1.5-rc.1",
+  "latestTested": "0.1.5-rc.2",
   "supported": [
-    "0.1.5-rc.1"
-  ],
-  "preview": [
+    "0.1.5-rc.1",
     "0.1.5-rc.2"
-  ]
+  ],
+  "preview": []
 }

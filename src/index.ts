@@ -38,6 +38,48 @@ function hasService(ctx: any, name: string): boolean {
   catch { return false }
 }
 
+/** The exact DSH release this runtime resolved for the core packages it uses. */
+const CORE_DSH_PACKAGES = ['@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-tools'] as const
+
+/**
+ * Report a runtime the plugin was never verified against.
+ *
+ * The live Web profile that failed run 4429470e ran rc.2 host packages beside an
+ * rc.1 SDK client, and nothing in the plugin noticed: the failure surfaced much
+ * later as an opaque worker error. The mismatch is logged loudly at mount and
+ * exposed through `diagnostics` so the situation is visible before a run starts,
+ * without refusing to load a composition a user may still want to drive.
+ */
+function dshRuntimeReport(): { versions: string[]; supported: boolean; detail: string } {
+  const versions = [...new Set(CORE_DSH_PACKAGES.map(id => packageVersion(id)).filter((value): value is string => Boolean(value)))]
+  const compatibility = compatibilityManifest()
+  const unsupported = versions.filter(version => !compatibility.supported.includes(version) && !compatibility.preview.includes(version))
+  return {
+    versions,
+    supported: versions.length > 0 && unsupported.length === 0,
+    detail: versions.length === 0
+      ? 'no DSH core package version could be resolved'
+      : unsupported.length > 0
+        ? `unsupported DSH runtime: ${unsupported.join(', ')} (declared supported: ${compatibility.supported.join(', ') || 'none'})`
+        : `DSH ${versions.join(', ')}`,
+  }
+}
+
+function compatibilityManifest(): { supported: string[]; preview: string[] } {
+  try {
+    const value = require('@gilbertgt/dsh-plan-orchestrator/compatibility.json') as { supported?: unknown; preview?: unknown }
+    return {
+      supported: Array.isArray(value.supported) ? value.supported.filter((item): item is string => typeof item === 'string') : [],
+      preview: Array.isArray(value.preview) ? value.preview.filter((item): item is string => typeof item === 'string') : [],
+    }
+  } catch {
+    // A published tarball always ships the manifest next to the entry point; a
+    // source checkout resolves it through the package name above. Failing to
+    // read it must not invent a supported version.
+    return { supported: [], preview: [] }
+  }
+}
+
 export function apply(ctx: Context) {
   const c = ctx as any
   const settings = registerSettings(c)
@@ -45,6 +87,9 @@ export function apply(ctx: Context) {
   const readOnly = new PlannerReadOnlyGuard()
   const store = new RunStore()
   c.sessionProjections.register(planOrchestratorProjectionDefinition)
+
+  const runtime = dshRuntimeReport()
+  if (!runtime.supported) c.logger?.error?.('plan-orchestrator: %s', runtime.detail)
 
   let orchestration: OrchestrationService
   orchestration = new OrchestrationService(store, createOrchestratorRunner({
@@ -169,9 +214,10 @@ export function apply(ctx: Context) {
             try { await repoRoot(cwd); repo = true } catch {}
           }
           return {
-            pluginVersion: '1.0.0',
+            pluginVersion: packageVersion('@gilbertgt/dsh-plan-orchestrator') ?? 'unknown',
             dshVersion: packageVersion('@deepseek-ai/dsh-plan-mode'),
-            compatibility: { supported: ['0.1.5-rc.1'], preview: ['0.1.5-rc.2'] },
+            dshRuntime: runtime.versions.join(', '),
+            compatibility: compatibilityManifest(),
             nativePlanMode: hasService(scope, 'planMode'),
             sdkAvailable: packageVersion('@deepseek-ai/dsh-sdk-client') !== undefined,
             gitAvailable,
@@ -180,6 +226,8 @@ export function apply(ctx: Context) {
             ghAvailable: await commandAvailable('gh', ['--version']),
             settingsWritable: settings.writable(),
             storage: store.root,
+            compatibilitySupported: runtime.supported,
+            compatibilityDetail: runtime.detail,
             readOnlyDegraded: typeof body.sessionId === 'string' ? readOnly.degraded(body.sessionId) : undefined,
           }
         },
