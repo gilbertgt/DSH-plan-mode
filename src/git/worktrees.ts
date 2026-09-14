@@ -82,7 +82,17 @@ export async function createWorktree(repo:string,runId:string,taskId:string,head
 }
 
 export async function removeOwnedWorktree(repo:string,lease:WorktreeLease,force=false){
-  await git(repo,['worktree','remove',...(force?['--force']:[]),lease.path])
+  // Removal rewrites the same registry as creation, and a wave tears its leases
+  // down concurrently, so it takes the same queue. The error still propagates:
+  // callers already contain it, and a silent failure here would hide a lease that
+  // was never released.
+  await serializeWorktreeMutation(repo, async () => {
+    try {
+      await git(repo,['worktree','remove',...(force?['--force']:[]),lease.path])
+    } finally {
+      await git(repo,['worktree','prune']).catch(()=>{})
+    }
+  })
   await rm(lease.path,{recursive:true,force:true}).catch(()=>{})
 }
 

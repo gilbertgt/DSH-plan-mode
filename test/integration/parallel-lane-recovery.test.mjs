@@ -127,6 +127,35 @@ test('concurrent lease creation does not corrupt the worktree registry', async (
     assert.equal(listed.split('worktree ').length - 1, taskIds.length + 1, 'exactly the main tree plus every lease')
 
     await Promise.all(leases.map(lease => removeOwnedWorktree(root, lease, true)))
+    for (const lease of leases) {
+      await assert.rejects(() => stat(lease.path), /ENOENT/, `${lease.taskId} must be gone`)
+    }
+  } finally {
+    await cleanup(root)
+    await cleanup(state)
+  }
+})
+
+/**
+ * Removal rewrites the same registry as creation and a wave tears its leases
+ * down concurrently, so a concurrent teardown must not fail either.
+ */
+test('concurrent lease removal releases every worktree', async () => {
+  const root = await repo()
+  const state = await mkdtemp(join(tmpdir(), 'planx-parallel-teardown-'))
+  try {
+    const head = await fullHead(root)
+    const taskIds = ['t1', 't2', 't3']
+    const leases = []
+    for (const taskId of taskIds) {
+      leases.push(await createWorktree(root, `${RUN}-worktrees`, taskId, head, state))
+    }
+
+    await Promise.all(leases.map(lease => removeOwnedWorktree(root, lease, true)))
+
+    for (const lease of leases) await assert.rejects(() => stat(lease.path), /ENOENT/)
+    const listed = (await git(root, ['worktree', 'list', '--porcelain'])).stdout.toString('utf8')
+    for (const taskId of taskIds) assert.equal(listed.includes(taskId), false, `${taskId} must be deregistered`)
   } finally {
     await cleanup(root)
     await cleanup(state)
