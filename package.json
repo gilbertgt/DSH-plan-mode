@@ -41,8 +41,8 @@
     }
   },
   "scripts": {
-    "test": "node --experimental-strip-types scripts/run-tests.mjs all",
-    "test:unit": "node --experimental-strip-types scripts/run-tests.mjs unit",
+    "test": "tsdown --config tsdown.config.mjs && node --experimental-strip-types scripts/run-tests.mjs all",
+    "test:unit": "tsdown --config tsdown.config.mjs && node --experimental-strip-types scripts/run-tests.mjs unit",
     "test:integration": "node --experimental-strip-types scripts/run-tests.mjs integration",
     "test:platform": "node --experimental-strip-types scripts/run-tests.mjs platform",
     "typecheck": "tsc --noEmit",
