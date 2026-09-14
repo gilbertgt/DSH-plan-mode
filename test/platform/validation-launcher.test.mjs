@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileCaptured } from '../../src/platform/captured-exec.ts'
-import { packageManagerLauncher, resolveValidationExecutable } from '../../src/validation/launcher.ts'
+import { npmCliScript, packageManagerLauncher, resolveValidationExecutable } from '../../src/validation/launcher.ts'
 
 const isWindows = process.platform === 'win32'
 
@@ -144,12 +144,12 @@ test(`a resolved Windows launcher passes script arguments through the real npm u
 })
 
 // This asserts the form launcher selection can emit on this host — never a
-// PowerShell script, always one of the documented `.cmd`/`.exe` names. It
-// deliberately does not claim yarn, bun, or pnpm are installed: requiring them
-// would force every CI image to carry a toolchain this project does not use.
+// PowerShell script, always either the direct Node CLI form for npm or one of
+// the documented `.cmd`/`.exe` shim names. It deliberately does not claim yarn,
+// bun, or pnpm are installed: requiring them would force every CI image to
+// carry a toolchain this project does not use.
 test('Windows launcher selection never returns, and never escapes, the documented executable forms', { skip: liveSkip }, () => {
   const documented = {
-    npm: ['npm.cmd'],
     pnpm: ['pnpm.cmd', 'pnpm.exe'],
     yarn: ['yarn.cmd'],
     bun: ['bun.exe', 'bun.cmd'],
@@ -159,4 +159,15 @@ test('Windows launcher selection never returns, and never escapes, the documente
     assert.doesNotMatch(launcher, /\.ps1$/i, `${manager} must never resolve to a PowerShell script`)
     assert.ok(forms.includes(launcher), `${manager} resolved to ${launcher}, outside the documented forms ${forms.join('/')}`)
   }
+
+  // npm is the deliberate exception: it must resolve to the direct Node CLI
+  // invocation when this host exposes one, and to the `.cmd` shim otherwise.
+  // Neither form may ever be a PowerShell script.
+  const npmLauncher = packageManagerLauncher('npm', { platform: 'win32' })
+  assert.doesNotMatch(npmLauncher, /\.ps1$/i, 'npm must never resolve to a PowerShell script')
+  const directForm = `& "${process.execPath}" "${npmCliScript(process.execPath)}"`
+  assert.ok(
+    npmLauncher === directForm || npmLauncher === 'npm.cmd',
+    `npm resolved to ${npmLauncher}, outside the documented forms ${directForm} / npm.cmd`,
+  )
 })

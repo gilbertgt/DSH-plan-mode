@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { git, fullHead } from '../../src/git/repository.ts'
 import { snapshotDirty, snapshotHash } from '../../src/git/fingerprints.ts'
 import { runValidation } from '../../src/validation/runner.ts'
+import { npmCliScript } from '../../src/validation/launcher.ts'
 import { assertTrustedReceipts } from '../../src/validation/review-handoff.ts'
 import { diagnoseResume } from '../../src/recovery/reconcile.ts'
 
@@ -114,10 +115,13 @@ test('validation refuses arbitrary commands and nonexistent package scripts befo
 test('Windows validation launches package scripts through an executable launcher and keeps the logical command',async()=>{
   const d=await repo(),runDir=await mkdtemp(join(tmpdir(),'planx-launch-'))
   try{
+    // npm resolves to the direct Node CLI form, which never enters the `.cmd`
+    // shim whose nested `CALL` fails under a confined grandchild.
+    const npm=`& "${process.execPath}" "${npmCliScript(process.execPath)}"`
     const cases=[
-      ['npm test','npm.cmd test'],
-      ['npm run test:unit','npm.cmd run test:unit'],
-      ['npm run test:unit -- --test-name-pattern=recovery','npm.cmd run test:unit -- --test-name-pattern=recovery'],
+      ['npm test',`${npm} test`],
+      ['npm run test:unit',`${npm} run test:unit`],
+      ['npm run test:unit -- --test-name-pattern=recovery',`${npm} run test:unit -- --test-name-pattern=recovery`],
     ]
     const launchers=windowsLaunchers('npm.cmd','pnpm.cmd','pnpm.exe','yarn.cmd','bun.exe','bun.cmd')
     for(const [logical,expected] of cases){
@@ -138,8 +142,11 @@ test('Windows validation selects each package manager launcher and applies the p
   try{
     await writeFile(join(d,'package.json'),JSON.stringify({private:true,scripts:{test:'node --test',typecheck:'tsc --noEmit',lint:'node --check src/index.ts',build:'node --version'}},null,2))
     const launchers=windowsLaunchers('npm.cmd','pnpm.cmd','pnpm.exe','yarn.cmd','bun.exe','bun.cmd')
+    // npm is the one manager the host rewrites to its own direct CLI form; the
+    // others keep their documented executable shims.
+    const npm=`& "${process.execPath}" "${npmCliScript(process.execPath)}"`
     for(const [logical,expected] of [
-      ['npm run typecheck','npm.cmd run typecheck'],
+      ['npm run typecheck',`${npm} run typecheck`],
       ['pnpm run typecheck','pnpm.cmd run typecheck'],
       ['yarn run lint','yarn.cmd run lint'],
       ['bun run build','bun.exe run build'],
