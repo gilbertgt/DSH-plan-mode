@@ -3,22 +3,32 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { execFileSync } from 'node:child_process'
 import { execFileCaptured } from '../../src/platform/captured-exec.ts'
 import { assertRepoPathConfined } from '../../src/git/repository.ts'
 import { minimalSdkEnv, sdkHarnessOptions } from '../../src/orchestration/sdk-backend.ts'
 
+/**
+ * Run one Git command whose output is not needed.
+ *
+ * `execFileCaptured` is the project's single subprocess seam: it selects
+ * file-backed stdio under the DSH sandbox marker and ordinary `execFile`
+ * everywhere else. Calling `execFileSync`/`spawnSync` directly here would
+ * reintroduce libuv named-pipe stdio, which a confined Windows grandchild
+ * cannot open, so the whole platform lane would fail with `spawn EPERM`
+ * instead of reporting a real regression.
+ */
+async function git(cwd, args, options = {}) {
+  return execFileCaptured('git', args, { cwd, ...options })
+}
+
 test('platform supports CJK and spaces through Git machine output', async()=>{
   const root=await mkdtemp(join(tmpdir(),'planx 平台 '))
   try{
-    // Confined Windows grandchildren cannot open libuv's named-pipe stdio, so a
-    // Git call that captures output must use the file-backed seam. Calls that
-    // need no output keep `stdio: 'ignore'`, which the restricted token permits.
-    execFileSync('git',['init'],{cwd:root,stdio:'ignore'})
-    execFileSync('git',['config','user.email','test@example.com'],{cwd:root,stdio:'ignore'})
-    execFileSync('git',['config','user.name','test'],{cwd:root,stdio:'ignore'})
+    await git(root,['init'])
+    await git(root,['config','user.email','test@example.com'])
+    await git(root,['config','user.name','test'])
     await writeFile(join(root,'初始.txt'),'base')
-    execFileSync('git',['add','.'],{cwd:root,stdio:'ignore'});execFileSync('git',['commit','-m','base'],{cwd:root,stdio:'ignore'})
+    await git(root,['add','.']);await git(root,['commit','-m','base'])
     await writeFile(join(root,'韓文 이름.txt'),'x')
     const out=(await execFileCaptured('git',['ls-files','--others','--exclude-standard','-z'],{cwd:root})).stdout
     assert.match(out.toString('utf8'),/韓文 이름\.txt/)
@@ -34,7 +44,7 @@ test('SDK child launch options preserve worktree cwd and exact role route',()=>{
 test('symlink/junction escape is rejected (where platform permits symlinks)', async(t)=>{
   const base=await mkdtemp(join(tmpdir(),'planx-boundary-')),root=join(base,'repo'),outside=join(base,'outside')
   try{
-    await mkdir(root);await mkdir(outside);execFileSync('git',['init'],{cwd:root,stdio:'ignore'})
+    await mkdir(root);await mkdir(outside);await git(root,['init'])
     try{await symlink(outside,join(root,'escape'),process.platform==='win32'?'junction':'dir')}catch(e){t.skip(`symlink unavailable: ${e.code??e}`);return}
     await assert.rejects(()=>assertRepoPathConfined(root,'escape/file.txt'),/escapes repository/)
   }finally{await rm(base,{recursive:true,force:true})}

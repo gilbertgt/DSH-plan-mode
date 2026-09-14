@@ -2,13 +2,9 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      full_compat:
-        description: Run rc.2 preview compatibility lane
-        required: false
-        default: false
-        type: boolean
 concurrency:
   group: plan-mode-v2-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -29,11 +25,14 @@ jobs:
       - run: npm run build
       - run: npm run pack:check
       - run: npm run compat:check
-        env:
-          DSH_VERSION_UNDER_TEST: 0.1.5-rc.1
       - run: npm run e2e:rc1
         env:
           PLANX_COEXISTENCE: '1'
+      # The production lane: approval handoff, parallel worktree workers, host
+      # validation, review and the terminal report, on a real packaged install.
+      - run: npm run e2e:plan
+        env:
+          PLANX_SKIP_SDK_LANE: '1'
 
   windows-rc1:
     name: Windows rc.1 behavior / Node 22
@@ -49,6 +48,9 @@ jobs:
       # verification are intentionally not duplicated from the Ubuntu lane.
       - run: npm run build
       - run: npm run e2e:rc1
+      - run: npm run e2e:plan
+        env:
+          PLANX_SKIP_SDK_LANE: '1'
 
   platform-node24:
     name: Platform ${{ matrix.os }} / Node 24
@@ -69,44 +71,23 @@ jobs:
       - run: npm run test:platform
 
   compat-rc2:
-    name: DSH rc.2 preview (manual only)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_compat }}
+    name: DSH rc.2 supported / Ubuntu Node 22
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: '22.19.0' }
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Overlay rc.2 API packages
-        run: >-
-          npm install --force --ignore-scripts --no-save
-          @deepseek-ai/dsh@0.1.5-rc.2
-          @deepseek-ai/dsh-agent@0.1.5-rc.2
-          @deepseek-ai/dsh-api-remotes@0.1.5-rc.2
-          @deepseek-ai/dsh-client-connection@0.1.5-rc.2
-          @deepseek-ai/dsh-client-locale@0.1.5-rc.2
-          @deepseek-ai/dsh-client-ui-conversation@0.1.5-rc.2
-          @deepseek-ai/dsh-client-ui-settings@0.1.5-rc.2
-          @deepseek-ai/dsh-client-ui-slots@0.1.5-rc.2
-          @deepseek-ai/dsh-llm@0.1.5-rc.2
-          @deepseek-ai/dsh-plan-mode@0.1.5-rc.2
-          @deepseek-ai/dsh-sandbox@0.1.5-rc.2
-          @deepseek-ai/dsh-sandbox-policy@0.1.5-rc.2
-          @deepseek-ai/dsh-sdk-client@0.1.5-rc.2
-          @deepseek-ai/dsh-session@0.1.5-rc.2
-          @deepseek-ai/dsh-session-projection@0.1.5-rc.2
-          @deepseek-ai/dsh-settings@0.1.5-rc.2
-          @deepseek-ai/dsh-subagent@0.1.5-rc.2
-          @deepseek-ai/dsh-system-prompt@0.1.5-rc.2
-          @deepseek-ai/dsh-tools@0.1.5-rc.2
-          @deepseek-ai/dsh-commands@0.1.5-rc.2
+      - run: npm test
       - run: npm run typecheck
       - run: npm run build
-      - run: npm run compat:check
-        env:
-          DSH_VERSION_UNDER_TEST: 0.1.5-rc.2
-          DSH_COMPAT_MODE: preview
+      # A pure rc.2 consumer: a fresh project whose only DSH dependencies are
+      # rc.2, into which the packed plugin is installed. Overlaying rc.2 packages
+      # onto this rc.1 workspace with `--force` proved nothing — the remaining
+      # rc.1 dependencies still had to resolve and the peer mismatch was
+      # suppressed rather than solved. Installing from the declared peer range
+      # is what a real rc.2 user does, and it either resolves or it does not.
+      - run: npm run compat:rc2
 # External Issue tests use local fake/mocked boundaries; ordinary CI never
-# creates a real GitHub PR. rc.2 is manual and non-blocking until promoted.
+# creates a real GitHub PR.

@@ -4,6 +4,7 @@ import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileCaptured } from '../../src/platform/captured-exec.ts'
+import { npmCliScript } from '../../src/validation/launcher.ts'
 import { materializeValidationDependencies } from '../../src/validation/dependencies.ts'
 
 /**
@@ -17,12 +18,14 @@ import { materializeValidationDependencies } from '../../src/validation/dependen
  */
 async function runNpm(args, cwd) {
   if (process.platform === 'win32') {
-    // Node does not execute .cmd files directly through execFileSync on current
-    // Windows releases (spawnSync EINVAL). This test exercises dependency
-    // materialization, not the PowerShell launcher seam covered separately by
-    // validation-launcher.test.mjs, so invoke the npm.cmd shim through ComSpec.
-    const comspec = process.env.ComSpec ?? process.env.COMSPEC ?? 'cmd.exe'
-    return (await execFileCaptured(comspec, ['/d', '/s', '/c', `npm.cmd ${args.join(' ')}`], { cwd })).stdout.toString('utf8')
+    // Node cannot execute the npm `.cmd` shim directly through its spawn path
+    // (spawnSync EINVAL), and going through the shim from cmd.exe would re-enter
+    // the nested `CALL ... npm-prefix.js` step that fails under a confined
+    // grandchild. Invoke the real CLI script through this process's own Node
+    // binary instead, which is exactly what the validation launcher now
+    // resolves to. This test exercises dependency materialization, not the
+    // launcher seam covered by validation-launcher.test.mjs.
+    return (await execFileCaptured(process.execPath, [npmCliScript(process.execPath), ...args], { cwd })).stdout.toString('utf8')
   }
   return (await execFileCaptured('npm', args, { cwd })).stdout.toString('utf8')
 }

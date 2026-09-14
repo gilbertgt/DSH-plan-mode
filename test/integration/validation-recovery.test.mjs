@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { git, fullHead } from '../../src/git/repository.ts'
 import { snapshotDirty, snapshotHash } from '../../src/git/fingerprints.ts'
 import { runValidation } from '../../src/validation/runner.ts'
+import { npmCliScript } from '../../src/validation/launcher.ts'
 import { assertTrustedReceipts } from '../../src/validation/review-handoff.ts'
 import { diagnoseResume } from '../../src/recovery/reconcile.ts'
 
@@ -35,10 +36,16 @@ async function validation(d,runDir,id,shell=fakeShell(),command='npm test',timeo
   return runValidation({cwd:d,runDir,runId:'r1',phase:'VALIDATING',commandId:id,command,timeoutMs,capBytes,shell,...(launcher?{launcher}:{})})
 }
 /** An injectable launcher probe, so Windows launcher selection is asserted
- * identically on a POSIX CI host and never depends on an installed toolchain. */
+ * identically on a POSIX CI host and never depends on an installed toolchain.
+ *
+ * `exists` is injected alongside `probe`: the npm branch resolves its CLI
+ * through a real filesystem check of the Node installation, which on a POSIX
+ * host points at a Windows path that does not exist. Without this the npm case
+ * silently fell back to `npm.cmd` and the test failed for a reason that has
+ * nothing to do with launcher selection. */
 function windowsLaunchers(...executables){
   const present=new Set(executables)
-  return {platform:'win32',probe:name=>present.has(name)}
+  return {platform:'win32',probe:name=>present.has(name),exists:()=>true}
 }
 
 test('sandboxed host validation distinguishes pass/fail/unsafe mutation/timeout and detects tampering',async()=>{
@@ -114,10 +121,13 @@ test('validation refuses arbitrary commands and nonexistent package scripts befo
 test('Windows validation launches package scripts through an executable launcher and keeps the logical command',async()=>{
   const d=await repo(),runDir=await mkdtemp(join(tmpdir(),'planx-launch-'))
   try{
+    // npm resolves to the direct Node CLI form, which never enters the `.cmd`
+    // shim whose nested `CALL` fails under a confined grandchild.
+    const npm=`& "${process.execPath}" "${npmCliScript(process.execPath)}"`
     const cases=[
-      ['npm test','npm.cmd test'],
-      ['npm run test:unit','npm.cmd run test:unit'],
-      ['npm run test:unit -- --test-name-pattern=recovery','npm.cmd run test:unit -- --test-name-pattern=recovery'],
+      ['npm test',`${npm} test`],
+      ['npm run test:unit',`${npm} run test:unit`],
+      ['npm run test:unit -- --test-name-pattern=recovery',`${npm} run test:unit -- --test-name-pattern=recovery`],
     ]
     const launchers=windowsLaunchers('npm.cmd','pnpm.cmd','pnpm.exe','yarn.cmd','bun.exe','bun.cmd')
     for(const [logical,expected] of cases){
@@ -138,8 +148,11 @@ test('Windows validation selects each package manager launcher and applies the p
   try{
     await writeFile(join(d,'package.json'),JSON.stringify({private:true,scripts:{test:'node --test',typecheck:'tsc --noEmit',lint:'node --check src/index.ts',build:'node --version'}},null,2))
     const launchers=windowsLaunchers('npm.cmd','pnpm.cmd','pnpm.exe','yarn.cmd','bun.exe','bun.cmd')
+    // npm is the one manager the host rewrites to its own direct CLI form; the
+    // others keep their documented executable shims.
+    const npm=`& "${process.execPath}" "${npmCliScript(process.execPath)}"`
     for(const [logical,expected] of [
-      ['npm run typecheck','npm.cmd run typecheck'],
+      ['npm run typecheck',`${npm} run typecheck`],
       ['pnpm run typecheck','pnpm.cmd run typecheck'],
       ['yarn run lint','yarn.cmd run lint'],
       ['bun run build','bun.exe run build'],

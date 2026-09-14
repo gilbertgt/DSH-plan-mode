@@ -1,19 +1,18 @@
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PlanSettings, RouteChoice } from '../contract/settings.ts'
 import type { PlanArtifact, PlanTask } from '../contract/plan-artifact.ts'
 import type { OrchestratorLaunch } from './service.ts'
 import { repoRoot, fullHead, assertRepoPathsConfined, git, decodeUtf8Strict } from '../git/repository.ts'
-import { snapshotDirty, deltaPaths, snapshotHash, ownedFingerprint, type TreeSnapshot } from '../git/fingerprints.ts'
+import { snapshotDirty, deltaPaths, snapshotHash, ownedFingerprint, pathFingerprints, type TreeSnapshot } from '../git/fingerprints.ts'
 import { assertOwnedPaths } from '../git/ownership.ts'
 import { createWorktree, removeOwnedWorktree, type WorktreeLease } from '../git/worktrees.ts'
 import { capturePatch, type PatchArtifact } from '../git/patches.ts'
 import { applyPatchArtifact, integratorPrompt, needsIntegrator } from './integrator.ts'
 import { buildWaves, recheckWave, type ExecutionWave } from './scheduler.ts'
 import { buildTaskPacket } from './task-packet.ts'
-import { NativeSpawnBackend, type RoleExecutionResult } from './native-backend.ts'
-import { SdkWorkspaceBackend, type SdkRoleExecutionResult } from './sdk-backend.ts'
+import { NativeSpawnBackend, resolveReviewerToolAllow, type RoleExecutionResult } from './native-backend.ts'
+import { SdkWorkspaceBackend, sdkLaneUnavailable, type SdkRoleExecutionResult } from './sdk-backend.ts'
 import { routeChoices, preflightRoute } from './role-router.ts'
 import { eligibleTransportFailure } from './failover.ts'
 import { runValidation } from '../validation/runner.ts'
@@ -36,11 +35,63 @@ interface WorkerOutcome { task: PlanTask; result: MutationResult; changed: strin
 interface WorktreeRecord { taskId: string; path: string; baseHead: string; status: 'ACTIVE'|'CAPTURED'|'FAILED'|'CLEANED'; fingerprint?: string; patchSha256?: string }
 
 const unionOwnership = (plan: PlanArtifact): string[] => [...new Set(plan.tasks.flatMap(task => task.modify))].sort()
+
+/**
+ * A safety boundary the orchestrator itself declared.
+ *
+ * These have to stay distinguishable from an ordinary fault: the service
+ * classifies BLOCKED vs FAILED from the error, and a provider message that
+ * merely contains a word like "conflict" used to be enough to mislabel a plain
+ * failure as a safety boundary.
+ */
+function blocked(message: string): Error {
+  const error = new Error(message)
+  ;(error as any).code = 'BLOCKED_BOUNDARY'
+  return error
+}
+
+/** Ownership/policy assertion whose failure is a blocked safety boundary. */
+function assertBoundary(operation: () => void): void {
+  try {
+    operation()
+  } catch (error) {
+    throw blocked((error as Error).message)
+  }
+}
+
+/** Render any thrown value as a bounded, human-readable diagnostic string. */
+function describeFailure(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message
+  if (typeof error === 'string' && error) return error
+  try {
+    const encoded = JSON.stringify(error)
+    if (encoded && encoded !== '{}' && encoded !== 'null') return encoded
+  } catch { /* fall through to the generic label */ }
+  return 'unknown failure'
+}
+
+export type SdkWaveSettlement<T> =
+  | { kind: 'complete'; outcomes: T[] }
+  | { kind: 'unavailable'; error: unknown }
+
+/**
+ * Drain every isolated SDK worker before deciding whether to fall back.
+ * A task/ownership failure always wins over an environment-only lane failure;
+ * serial work must never start while a sibling SDK worker is still running.
+ */
+export async function settleSdkWave<T>(promises: Promise<T>[]): Promise<SdkWaveSettlement<T>> {
+  const settled = await Promise.allSettled(promises)
+  const failures = settled.filter((item): item is PromiseRejectedResult => item.status === 'rejected')
+  const taskFailure = failures.find(item => !sdkLaneUnavailable(item.reason))
+  if (taskFailure) throw taskFailure.reason
+  if (failures.length > 0) return { kind: 'unavailable', error: failures[0]!.reason }
+  return { kind: 'complete', outcomes: settled.map(item => (item as PromiseFulfilledResult<T>).value) }
+}
 /**
  * Absent route fields must not exist at all. An explicit `reasoningEffort:
  * undefined` is rejected by every DSH lossless-JSON boundary (subagent
  * descriptors, the session log, SDK child options), so each property is
- * constructed only when the live agent actually carries a value — including
+ * constructed only when the live agent actually carries a value ??including
  * provider/model, which an unresolved inherited agent legitimately lacks.
  */
 export const currentRoute = (agent: any): RouteChoice => {
@@ -91,7 +142,7 @@ async function runMutationRole<T extends MutationResult>(
       if (!eligibleTransportFailure(error)) throw error
       const current = await snapshotDirty(root)
       const changed = deltaPaths(logicalBaseline, current)
-      assertOwnedPaths(changed, allowed)
+      assertOwned(changed, allowed)
       if (changed.length > 0) {
         if (index + 1 >= routes.length) throw error
         // Post-mutation: one and only one continuation attempt.
@@ -143,6 +194,29 @@ async function writeWorktreeManifest(runDir: string, records: WorktreeRecord[]):
   await atomicJson(join(runDir, 'worktrees.json'), { schemaVersion: 1, worktrees: records })
 }
 
+/**
+ * Serialize the shared `worktrees.json` writers.
+ *
+ * Every parallel task mutates one shared record array and rewrites the whole
+ * file. `atomicJson` prevents a torn file but not a stale full-file overwrite:
+ * an older snapshot renamed last silently reverts a sibling's newer state
+ * (a CAPTURED task back to ACTIVE). Writing the current records under one
+ * per-run lock makes the last write the newest state instead of the slowest.
+ */
+function serializeWorktreeWrites(runDir: string): (records: WorktreeRecord[]) => Promise<void> {
+  let tail: Promise<unknown> = Promise.resolve()
+  return (records: WorktreeRecord[]) => {
+    const snapshot = records.map(record => ({ ...record }))
+    const next = tail.then(() => writeWorktreeManifest(runDir, snapshot))
+    tail = next.catch(() => {})
+    return next
+  }
+}
+
+function assertOwned(changed: string[], allowed: string[]): void {
+  assertBoundary(() => assertOwnedPaths(changed, allowed))
+}
+
 function dirtyOwnershipConflict(runBaseline: TreeSnapshot, tasks: PlanTask[]): boolean {
   const dirty = new Set(Object.keys(runBaseline.paths))
   return tasks.some(task => task.modify.some(path => dirty.has(path)))
@@ -176,6 +250,12 @@ async function nativeReviewer(
   label: string,
 ): Promise<{ text: string; usage: UsageSample }> {
   let last: unknown
+  // Resolve the read-only capability allow-list against the real parent
+  // catalog once. DSH's `tools.restrict()` rejects a name the child cannot
+  // inherit ??a profile without an LSP service has no `lsp` tool ??and that
+  // throw aborts the whole run before any review happens. Only capabilities
+  // this composition actually registers are named.
+  const toolFilter = { allow: resolveReviewerToolAllow(ctx, parent) }
   for (let index = 0; index < routes.length; index++) {
     const route = routes[index]!
     const started = Date.now()
@@ -189,7 +269,7 @@ async function nativeReviewer(
         maxDepth: 1,
         // Allow-list instead of deny-list: unknown third-party mutation tools do
         // not become visible merely because we failed to name them.
-        toolFilter: { allow: ['read', 'glob', 'grep', 'lsp', 'web_search', 'web_fetch'] },
+        toolFilter,
         persona: 'Independent Reviewer. Strictly read-only. Review host evidence and current files; never mutate repository or external state.',
       })
       try {
@@ -290,7 +370,7 @@ async function executeSerialTask(
   if (result.status !== 'COMPLETE') throw new Error(`worker ${task.id}: ${result.status}`)
   if (result.__usage) usage.push(result.__usage)
   const changed = deltaPaths(before, await snapshotDirty(root))
-  assertOwnedPaths(changed, task.modify)
+  assertOwned(changed, task.modify)
   return { task, result, changed }
 }
 
@@ -309,13 +389,14 @@ async function executeWorktreeTask(
   handoffs: string[],
   usage: UsageSample[],
   records: WorktreeRecord[],
+  writeRecords: (records: WorktreeRecord[]) => Promise<void>,
   seedPatch: PatchArtifact | undefined,
 ): Promise<WorkerOutcome> {
   deps.emit?.('task-start', { runId, taskId: task.id })
   const lease = await createWorktree(root, leaseRunId, task.id, head, deps.store.root)
   const record: WorktreeRecord = { taskId: task.id, path: lease.path, baseHead: head, status: 'ACTIVE' }
   records.push(record)
-  await writeWorktreeManifest(runDir, records)
+  await writeRecords(records)
   let accepted = false
   try {
     if (seedPatch) await applyPatchArtifact(lease.path, seedPatch, seedPatch.files.map(file => file.path))
@@ -334,24 +415,24 @@ async function executeWorktreeTask(
     if (result.__usage) usage.push(result.__usage)
     const after = await snapshotDirty(lease.path)
     const changed = deltaPaths(before, after)
-    assertOwnedPaths(changed, task.modify)
+    assertOwned(changed, task.modify)
     const patch = await capturePatch(lease.path, head, task.id, changed)
     await atomicJson(join(runDir, 'patches', `${task.id}.json`), patch)
     record.status = 'CAPTURED'
     record.fingerprint = snapshotHash(after)
     record.patchSha256 = patch.sha256
-    await writeWorktreeManifest(runDir, records)
+    await writeRecords(records)
     accepted = true
     return { task, result, changed, patch }
   } catch (error) {
     record.status = 'FAILED'
-    await writeWorktreeManifest(runDir, records).catch(() => {})
+    await writeRecords(records).catch(() => {})
     throw error
   } finally {
     if (accepted || !deps.settings(root).execution.keepFailedWorktrees) {
       await removeOwnedWorktree(root, lease, true).catch(() => {})
       record.status = 'CLEANED'
-      await writeWorktreeManifest(runDir, records).catch(() => {})
+      await writeRecords(records).catch(() => {})
     }
   }
 }
@@ -370,7 +451,7 @@ export function createOrchestratorRunner(deps: EngineDeps) {
     const root = await repoRoot(launch.agent.session.header?.cwd ?? process.cwd())
     const settings = deps.settings(root)
     const head = await fullHead(root)
-    if (launch.baselineHead && launch.baselineHead !== head) throw new Error(`approved baseline HEAD drift: ${launch.baselineHead} -> ${head}`)
+    if (launch.baselineHead && launch.baselineHead !== head) throw blocked(`approved baseline HEAD drift: ${launch.baselineHead} -> ${head}`)
 
     const allOwned = unionOwnership(plan)
     await assertRepoPathsConfined(root, allOwned)
@@ -390,6 +471,7 @@ export function createOrchestratorRunner(deps: EngineDeps) {
     const handoffs = launch.resumeFrom ? await readJson<string[]>(handoffPath).catch(() => []) : []
     const usage: UsageSample[] = []
     const worktreeRecords = await readJson<{ worktrees: WorktreeRecord[] }>(join(runDir, 'worktrees.json')).then(v => v.worktrees).catch(() => [])
+    const writeRecords = serializeWorktreeWrites(runDir)
     const completed = new Set(launch.completedTaskIds ?? [])
     let hadWorktree = worktreeRecords.some(record => record.status === 'CAPTURED' || record.status === 'CLEANED')
 
@@ -422,24 +504,51 @@ export function createOrchestratorRunner(deps: EngineDeps) {
 
         hadWorktree = true
         const mainBefore = await snapshotDirty(root)
-        if (mainBefore.head !== head) throw new Error('HEAD drift before parallel wave')
+        if (mainBefore.head !== head) throw blocked('HEAD drift before parallel wave')
         const priorRunDelta = deltaPaths(runBaseline, mainBefore)
-        assertOwnedPaths(priorRunDelta, allOwned)
+        assertOwned(priorRunDelta, allOwned)
         const seedPatch = priorRunDelta.length > 0 ? await capturePatch(root, head, '__wave_seed__', priorRunDelta) : undefined
-        const outcomes = await Promise.all(waveTasks.map(task => executeWorktreeTask(
+
+        // Drain the complete isolated wave before deciding whether to retry it
+        // serially, so fallback never overlaps a sibling SDK worker.
+        const waveSettlement = await settleSdkWave(waveTasks.map(task => executeWorktreeTask(
           deps, launch, runId, leaseRunId, runDir, root, head, task, plan,
-          workerRoutes, signal, handoffs, usage, worktreeRecords, seedPatch,
+          workerRoutes, signal, handoffs, usage, worktreeRecords, writeRecords, seedPatch,
         )))
+        if (waveSettlement.kind === 'unavailable') {
+          deps.emit?.('phase', {
+            runId,
+            sessionId: launch.sessionId,
+            phase: 'WORKERS',
+            message: `parallel SDK lane unavailable; retrying this wave serially (${describeFailure(waveSettlement.error).slice(0, 300)})`,
+          })
+          for (const task of waveTasks) {
+            const outcome = await executeSerialTask(deps, launch, task, plan, root, workerRoutes, signal, handoffs, usage)
+            handoffs.push(`${task.id}: host-observed=${outcome.changed.join(',') || '(none)'} status=${outcome.result.status}`)
+            completed.add(task.id)
+            deps.emit?.('task-end', { runId, taskId: task.id, status: outcome.result.status })
+            await atomicJson(handoffPath, handoffs)
+            await updateCheckpoint(store, launch, runId, root, head, allOwned, 'WORKERS', { completedTaskIds: [...completed], safeBoundary: true })
+          }
+          continue
+        }
+        const outcomes = waveSettlement.outcomes
 
         const mainAfterWorkers = await snapshotDirty(root)
         if (snapshotHash(mainAfterWorkers) !== snapshotHash(mainBefore)) {
-          throw new Error('working tree drift while parallel workers were isolated; refusing to apply patches')
+          throw blocked('working tree drift while parallel workers were isolated; refusing to apply patches')
         }
-        if (await fullHead(root) !== head) throw new Error('HEAD drift before applying parallel worker patches')
+        if (await fullHead(root) !== head) throw blocked('HEAD drift before applying parallel worker patches')
 
         for (const outcome of outcomes) {
           if (!outcome.patch) throw new Error(`missing patch artifact for ${outcome.task.id}`)
-          await applyPatchArtifact(root, outcome.patch, allOwned)
+          // The patch was captured inside a lease and is written here much later,
+          // so the exact state of every target is re-read immediately before the
+          // write: a user edit landing in this window is a blocked boundary, not
+          // something the patch is allowed to overwrite.
+          const targets = outcome.patch.files.map(file => file.path)
+          const expected = await pathFingerprints(root, targets)
+          await applyPatchArtifact(root, outcome.patch, allOwned, { expected })
           handoffs.push(`${outcome.task.id}: host-observed=${outcome.changed.join(',') || '(none)'} status=${outcome.result.status}`)
           completed.add(outcome.task.id)
           deps.emit?.('task-end', { runId, taskId: outcome.task.id, status: outcome.result.status })
@@ -468,18 +577,18 @@ export function createOrchestratorRunner(deps: EngineDeps) {
         }))
         if (result.status !== 'COMPLETE') throw new Error(`integrator: ${result.status}`)
         if (result.__usage) usage.push(result.__usage)
-        assertOwnedPaths(deltaPaths(integratorBefore, await snapshotDirty(root)), allOwned)
+        assertOwned(deltaPaths(integratorBefore, await snapshotDirty(root)), allOwned)
       }
 
       const afterMutation = await snapshotDirty(root)
       const ownedDelta = deltaPaths(runBaseline, afterMutation)
-      assertOwnedPaths(ownedDelta, allOwned)
+      assertOwned(ownedDelta, allOwned)
       await updateCheckpoint(store, launch, runId, root, head, allOwned, 'VALIDATING', { completedTaskIds: [...completed], safeBoundary: true })
     }
 
     let finalSnapshot = await snapshotDirty(root)
     let runDelta = deltaPaths(runBaseline, finalSnapshot)
-    assertOwnedPaths(runDelta, allOwned)
+    assertOwned(runDelta, allOwned)
     deps.emit?.('phase', { runId, sessionId: launch.sessionId, phase: 'VALIDATING' })
     let receipts = await validateIsolated(root, head, `${runId}-validation-${Date.now()}`, runDir, runId, runDelta, plan, settings, store, 'VALIDATING', deps.emit)
     await updateCheckpoint(store, launch, runId, root, head, allOwned, 'REVIEWING', { completedTaskIds: [...completed], safeBoundary: true })
@@ -492,7 +601,7 @@ export function createOrchestratorRunner(deps: EngineDeps) {
     while (true) {
       finalSnapshot = await snapshotDirty(root)
       runDelta = deltaPaths(runBaseline, finalSnapshot)
-      assertOwnedPaths(runDelta, allOwned)
+      assertOwned(runDelta, allOwned)
       const fingerprint = await ownedFingerprint(root, runDelta)
       await assertTrustedReceipts(receipts, head, fingerprint)
       const actualDiff = await boundedTextDiff(root, runDelta, preExisting)
@@ -531,11 +640,11 @@ export function createOrchestratorRunner(deps: EngineDeps) {
       }))
       if (result.status !== 'COMPLETE') throw new Error(`targeted fix: ${result.status}`)
       if (result.__usage) usage.push(result.__usage)
-      assertOwnedPaths(deltaPaths(fixBefore, await snapshotDirty(root)), allOwned)
+      assertOwned(deltaPaths(fixBefore, await snapshotDirty(root)), allOwned)
 
       finalSnapshot = await snapshotDirty(root)
       runDelta = deltaPaths(runBaseline, finalSnapshot)
-      assertOwnedPaths(runDelta, allOwned)
+      assertOwned(runDelta, allOwned)
       deps.emit?.('phase', { runId, sessionId: launch.sessionId, phase: 'VALIDATING', reviewRound: fixRound })
       receipts = await validateIsolated(root, head, `${runId}-fix-${fixRound}-${Date.now()}`, runDir, runId, runDelta, plan, settings, store, 'FIXING', deps.emit)
       await updateCheckpoint(store, launch, runId, root, head, allOwned, 'REVIEWING', { completedTaskIds: [...completed], safeBoundary: true })
@@ -543,7 +652,7 @@ export function createOrchestratorRunner(deps: EngineDeps) {
 
     finalSnapshot = await snapshotDirty(root)
     const finalDelta = deltaPaths(runBaseline, finalSnapshot)
-    assertOwnedPaths(finalDelta, allOwned)
+    assertOwned(finalDelta, allOwned)
     const finalFingerprint = await ownedFingerprint(root, finalDelta)
     await assertTrustedReceipts(receipts, head, finalFingerprint)
     const usageSummary = aggregateUsage(usage)
@@ -562,7 +671,10 @@ export function createOrchestratorRunner(deps: EngineDeps) {
       })
     }
 
-    deps.emit?.('phase', { runId, sessionId: launch.sessionId, phase: 'COMPLETE' })
+    // The completion record is durable before the COMPLETE phase is announced.
+    // Emitting first meant a failed `completion.json` write was reported to the
+    // conversation as COMPLETE and then converged on FAILED, a terminal state
+    // the run never actually reached.
     await atomicJson(join(runDir, 'completion.json'), {
       runId,
       planHash: launch.planHash,
@@ -573,15 +685,10 @@ export function createOrchestratorRunner(deps: EngineDeps) {
       usage: usageSummary,
       completedAt: new Date().toISOString(),
     })
-
-    try {
-      launch.agent.inject(createUserMessage({
-        content: [{
-          type: 'text',
-          text: `Plan Orchestrator completed run ${runId}. Reviewer: PASS. Changed paths: ${finalDelta.join(', ') || '(none)'}. Validation: ${receipts.map((receipt: any) => `${receipt.commandId}=${receipt.status}`).join(', ') || 'no host commands'}.`,
-        }],
-        source: { kind: 'plugin', plugin: 'plan-orchestrator' },
-      }))
-    } catch {}
+    deps.emit?.('phase', { runId, sessionId: launch.sessionId, phase: 'COMPLETE' })
+    // The terminal report is delivered by OrchestrationService.finalize, which
+    // is the single delivery point for every outcome. This engine used to
+    // `inject` a COMPLETE-only notice here, which never woke the parent driver
+    // and said nothing at all for BLOCKED, FAILED or CANCELLED.
   }
 }

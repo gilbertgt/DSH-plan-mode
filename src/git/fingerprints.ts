@@ -45,3 +45,16 @@ export function deltaPaths(before: TreeSnapshot, after: TreeSnapshot): string[] 
 export function snapshotHash(snapshot: TreeSnapshot): string {
   return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')
 }
+
+/**
+ * Fingerprint an explicit path list, including paths that are currently clean.
+ *
+ * `snapshotDirty` only records dirty paths, so a compare-and-swap over the files
+ * a captured patch is about to overwrite needs its own read of exactly those
+ * paths — clean ones included, because "clean" is itself the expected value.
+ */
+export async function pathFingerprints(root: string, paths: readonly string[]): Promise<Record<string, PathFingerprint>> {
+  const out: Record<string, PathFingerprint> = {}
+  for (const path of [...new Set(paths)].sort()) out[path] = await fingerprintPath(root, path)
+  return out
+}

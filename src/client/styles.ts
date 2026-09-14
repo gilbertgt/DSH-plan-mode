@@ -9,7 +9,9 @@ export const STYLE = `
 .planx-muted{opacity:.72}.planx-error{border-left:3px solid currentColor;padding:8px;margin:8px 0}
 .planx-chip{border-radius:999px!important;padding:4px 9px!important;white-space:nowrap}
 .planx-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.planx-between{justify-content:space-between}
-.planx label{display:grid;gap:4px;margin:8px 0}.planx input,.planx select{background:transparent;color:inherit;border:1px solid color-mix(in srgb,currentColor 20%,transparent);border-radius:7px;padding:7px;min-width:0}
+.planx label{display:grid;gap:4px;margin:8px 0}.planx input{background:transparent;color:inherit;border:1px solid color-mix(in srgb,currentColor 20%,transparent);border-radius:7px;padding:7px;min-width:0}
+.planx select{background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-primary,CanvasText);border:1px solid color-mix(in srgb,currentColor 20%,transparent);border-radius:7px;padding:7px;min-width:0}
+.planx select option{background:inherit;color:inherit}
 .planx input[type="checkbox"]{width:auto}.planx pre{white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}
 .planx-overlay{position:fixed;inset:0;background:rgba(0,0,0,.38);display:flex;justify-content:flex-end;z-index:9999}
 .planx-dialog{width:min(720px,92vw);height:100%;overflow:auto;background:Canvas;color:CanvasText;padding:20px;box-shadow:0 0 30px rgba(0,0,0,.25)}
