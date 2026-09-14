@@ -15,7 +15,7 @@ export function apply(ctx: any) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'plan-orchestrator: locale')
   ctx.effect(() => {
     const style = document.createElement('style')
-    style.dataset.plugin = 'dsh-plan-orchestrator'
+    style.dataset.plugin = '@gilbertgt/dsh-plan-orchestrator'
     style.textContent = STYLE
     document.head.append(style)
     return () => style.remove()
