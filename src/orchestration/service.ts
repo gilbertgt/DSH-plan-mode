@@ -6,6 +6,7 @@ import { RunStore, atomicJson, readJson, type RunManifest } from '../recovery/st
 import { diagnoseResume, interruptManifest, type RecoveryCheckpoint } from '../recovery/reconcile.ts'
 import { repoRoot } from '../git/repository.ts'
 import { cleanupRunWorktrees } from '../git/worktrees.ts'
+import { deliverTerminalReport, terminalReportText, type TerminalPhase } from './report.ts'
 
 export interface ExternalRunMeta {
   issueNumber: number
@@ -31,6 +32,7 @@ export interface RunView extends RunProjection {
   receipts?: unknown
   usage?: unknown
   changedPaths?: string[]
+  failure?: { phase: string; message?: string; cause?: { code?: string; message: string; chain: string[] } }
 }
 
 interface Pending { runId: string; launch: OrchestratorLaunch; persisted: Promise<void>; cancelled: boolean }
@@ -38,8 +40,29 @@ interface Pending { runId: string; launch: OrchestratorLaunch; persisted: Promis
 type OrchestratorRunner = (launch: OrchestratorLaunch, runId: string, signal: AbortSignal) => Promise<void>
 
 const TERMINAL_PHASES = new Set<string>(['COMPLETE', 'BLOCKED', 'FAILED', 'INTERRUPTED', 'CANCELLED'])
+const TERMINALS: readonly TerminalPhase[] = ['COMPLETE', 'BLOCKED', 'FAILED', 'CANCELLED']
 /** Runner errors matching this shape are safety boundaries, not plain faults. */
 const BLOCKING_FAILURE = /(drift|ownership|blocked|inconclusive|unsafe|conflict|escape|checkpoint|tampered|stale)/i
+
+/**
+ * A failure the orchestrator itself declared a safety boundary.
+ *
+ * The persisted `code` is the primary classifier: a plain provider or filesystem
+ * fault whose message merely happens to contain a word like "conflict" or
+ * "server" must stay FAILED rather than being promoted to BLOCKED, so the regex
+ * survives only as a fallback for errors thrown before the typed boundary.
+ */
+export class OrchestrationBlockedError extends Error {
+  readonly code = 'BLOCKED_BOUNDARY'
+  constructor(message: string) {
+    super(message)
+    this.name = 'OrchestrationBlockedError'
+  }
+}
+
+function isTerminalPhase(phase: string): phase is TerminalPhase {
+  return (TERMINALS as readonly string[]).includes(phase)
+}
 
 function failureMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message
@@ -51,8 +74,27 @@ function failureMessage(error: unknown): string {
   return 'unknown orchestration failure'
 }
 
-function terminalPhaseFor(aborted: boolean, message: string): 'CANCELLED'|'BLOCKED'|'FAILED' {
+/** Bounded `cause` chain, outermost first, so a wrapped root cause survives. */
+function failureChain(error: unknown): string[] {
+  const chain: string[] = []
+  let current: unknown = error
+  for (let depth = 0; depth < 8 && current !== undefined && current !== null; depth++) {
+    const next = current instanceof Error ? current.cause : undefined
+    chain.push(failureMessage(current))
+    if (next === current) break
+    current = next
+  }
+  return [...new Set(chain)]
+}
+
+function failureCode(error: unknown): string | undefined {
+  const code = (error as any)?.code
+  return typeof code === 'string' && code.length > 0 && code.length <= 80 ? code : undefined
+}
+
+function terminalPhaseFor(aborted: boolean, message: string, code?: string): 'CANCELLED'|'BLOCKED'|'FAILED' {
   if (aborted) return 'CANCELLED'
+  if (code === 'BLOCKED_BOUNDARY') return 'BLOCKED'
   return BLOCKING_FAILURE.test(message) ? 'BLOCKED' : 'FAILED'
 }
 
@@ -65,6 +107,14 @@ export class OrchestrationService {
   #controllers = new Map<string, AbortController>()
   #views = new Map<string, RunView>()
   #agents = new Map<string, any>()
+  /**
+   * Identifiers whose terminal report already reached the parent conversation.
+   *
+   * `finalize` is the single delivery point and is reachable more than once for
+   * one run (a resume that fails to start, a cancel racing the launch), so the
+   * conversation must not receive the same outcome twice.
+   */
+  #reported = new Set<string>()
 
   constructor(store: RunStore, runner: OrchestratorRunner) {
     this.store = store
@@ -115,11 +165,12 @@ export class OrchestrationService {
     const view = this.#views.get(runId)
     if (!view) return undefined
     const dir = this.store.runDir(view.sessionId, runId)
-    const [completion, telemetry, worktrees, checkpoint] = await Promise.all([
+    const [completion, telemetry, worktrees, checkpoint, failure] = await Promise.all([
       readJson<any>(join(dir, 'completion.json')).catch(() => undefined),
       readJson<any>(join(dir, 'telemetry.json')).catch(() => undefined),
       readJson<any>(join(dir, 'worktrees.json')).catch(() => undefined),
       readJson<any>(join(dir, 'recovery.json')).catch(() => undefined),
+      readJson<any>(join(dir, 'failure.json')).catch(() => undefined),
     ])
     const latestReview = await this.latestReview(dir, view.reviewRound)
     return {
@@ -128,6 +179,7 @@ export class OrchestrationService {
       usage: completion?.usage ?? telemetry,
       review: latestReview?.verdict ?? completion?.review,
       worktrees: worktrees?.worktrees ?? [],
+      ...(failure ? { failure } : {}),
       recovery: checkpoint ? { phase: checkpoint.phase, safeBoundary: checkpoint.safeBoundary, completedTaskIds: checkpoint.completedTaskIds } : undefined,
     }
   }
@@ -143,6 +195,10 @@ export class OrchestrationService {
       view.status = view.phase
       view.reviewRound = Number(data.reviewRound ?? view.reviewRound)
       if (data.message) view.message = String(data.message)
+      // A terminal phase ends every task. Leaving an entry behind would show a
+      // finished run as still working, which is exactly what the FAILED run
+      // 4429470e reported after its parallel wave failed mid-flight.
+      if (TERMINAL_PHASES.has(view.phase)) view.activeTaskIds = []
       this.append(session, 'planx/run-phase', {
         runId,
         phase: view.phase,
@@ -176,17 +232,23 @@ export class OrchestrationService {
     if (pending?.runId === runId) {
       pending.cancelled = true
       let persistError: unknown
-      try { await pending.persisted } catch (error) { persistError = error }
+      try {
+        try { await pending.persisted } catch (error) { persistError = error }
 
-      const controller = this.#controllers.get(runId)
-      const active = this.#active.get(sessionId)
-      if (controller && active) {
-        if (!controller.signal.aborted) controller.abort(reason)
-        await active.catch(() => {})
-      } else {
-        await this.markCancelled(view, reason, persistError)
+        const controller = this.#controllers.get(runId)
+        const active = this.#active.get(sessionId)
+        if (controller && active) {
+          if (!controller.signal.aborted) controller.abort(reason)
+          await active.catch(() => {})
+        } else {
+          await this.markCancelled(pending.launch, view, reason, persistError)
+        }
+      } finally {
+        // The pending entry is the fence the parent is held behind, so it must be
+        // released on every path: a throwing terminal append used to leave
+        // `shouldFence()` true forever with the manifest still APPROVED_PENDING.
+        if (this.#pending.get(sessionId) === pending) this.#pending.delete(sessionId)
       }
-      if (this.#pending.get(sessionId) === pending) this.#pending.delete(sessionId)
       return true
     }
 
@@ -362,6 +424,7 @@ export class OrchestrationService {
   private async run(launch: OrchestratorLaunch, runId: string, signal: AbortSignal): Promise<void> {
     let terminalPhase: 'COMPLETE'|'BLOCKED'|'FAILED'|'CANCELLED' = 'COMPLETE'
     let terminalMessage: string | undefined
+    let terminalCause: unknown
     let thrown: unknown
     let failed = false
     try {
@@ -376,8 +439,9 @@ export class OrchestrationService {
         // event or manifest write must not leave a permanently non-terminal run.
         thrown = error
         failed = true
+        terminalCause = error
         terminalMessage = failureMessage(error)
-        terminalPhase = terminalPhaseFor(signal.aborted, terminalMessage)
+        terminalPhase = terminalPhaseFor(signal.aborted, terminalMessage, failureCode(error))
       }
       if (!failed) {
         try {
@@ -391,12 +455,13 @@ export class OrchestrationService {
         } catch (error) {
           thrown = error
           failed = true
+          terminalCause = error
           terminalMessage = failureMessage(error)
-          terminalPhase = terminalPhaseFor(signal.aborted, terminalMessage)
+          terminalPhase = terminalPhaseFor(signal.aborted, terminalMessage, failureCode(error))
         }
       }
     } finally {
-      await this.finalize(launch, runId, terminalPhase, terminalMessage)
+      await this.finalize(launch, runId, terminalPhase, terminalMessage, terminalCause)
     }
     if (failed) throw thrown
   }
@@ -405,11 +470,12 @@ export class OrchestrationService {
    * Best-effort terminal manifest write. Returns the failure instead of
    * throwing so the caller can decide how to converge.
    */
-  private async writeTerminal(launch: OrchestratorLaunch, runId: string, phase: string): Promise<{ ok: true } | { ok: false; error: unknown }> {
+  private async writeTerminal(launch: OrchestratorLaunch, runId: string, phase: string, failureArtifact?: { sha256: string; bytes: number }): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
       const latest = await this.store.readManifest(launch.sessionId, runId)
       latest.phase = phase
       latest.terminal = true
+      if (failureArtifact) latest.failureArtifact = failureArtifact
       await this.store.writeManifest(latest)
       return { ok: true }
     } catch (error) {
@@ -418,15 +484,66 @@ export class OrchestrationService {
   }
 
   /**
+   * Persist the run's own failure account next to the manifest.
+   *
+   * The manifest carries only a phase, and the phase event's message is the last
+   * one written — the failed run 4429470e kept the generic
+   * `subagent t1-report-module stopped: error` while the real cause (the SDK lane
+   * was unavailable, so the wave downgraded to serial) had already been
+   * overwritten. This record keeps both the terminal message and the cause chain
+   * so a finished run stays diagnosable after the process is gone.
+   *
+   * Never throws: losing the diagnosis must not change the terminal phase.
+   */
+  private async writeFailureRecord(
+    launch: OrchestratorLaunch,
+    runId: string,
+    phase: string,
+    message: string | undefined,
+    cause: unknown,
+  ): Promise<{ sha256: string; bytes: number } | undefined> {
+    try {
+      const record = {
+        schemaVersion: 1,
+        runId,
+        phase,
+        stage: this.#views.get(runId)?.phase ?? phase,
+        ...(message ? { message } : {}),
+        cause: {
+          ...(failureCode(cause) ? { code: failureCode(cause) } : {}),
+          message: failureMessage(cause),
+          chain: failureChain(cause),
+        },
+        at: new Date().toISOString(),
+      }
+      const body = `${JSON.stringify(record, null, 2)}\n`
+      const dir = this.store.runDir(launch.sessionId, runId)
+      const sha256 = await atomicJson(join(dir, 'failure.json'), record)
+      return { sha256, bytes: Buffer.byteLength(body, 'utf8') }
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * Persist the terminal state. Never throws: a session whose append is
    * unavailable must still not be left with a non-terminal manifest.
+   *
+   * This is also the single delivery point for the terminal report, so every
+   * outcome — COMPLETE, BLOCKED, FAILED and CANCELLED — reaches the parent
+   * conversation from one place instead of only the engine's COMPLETE-only
+   * `inject`, which never woke the driver.
    */
-  private async finalize(launch: OrchestratorLaunch, runId: string, phase: string, message?: string): Promise<void> {
+  private async finalize(launch: OrchestratorLaunch, runId: string, phase: string, message?: string, cause?: unknown): Promise<void> {
     if (!TERMINAL_PHASES.has(phase)) throw new Error(`plan-orchestrator refusing non-terminal finalize phase: ${phase}`)
     const at = new Date().toISOString()
     let effectivePhase = phase
     let effectiveMessage = message
-    const written = await this.writeTerminal(launch, runId, effectivePhase)
+    let failureArtifact: { sha256: string; bytes: number } | undefined
+    if (effectivePhase !== 'COMPLETE' && effectivePhase !== 'CANCELLED') {
+      failureArtifact = await this.writeFailureRecord(launch, runId, effectivePhase, effectiveMessage, cause)
+    }
+    const written = await this.writeTerminal(launch, runId, effectivePhase, failureArtifact)
     if (!written.ok) {
       // Terminal persistence failed, so the run can no longer be reported as its
       // intended phase. Converge on FAILED — no later step may announce
@@ -436,7 +553,8 @@ export class OrchestrationService {
       // already knows this run failed.
       effectivePhase = 'FAILED'
       effectiveMessage = `terminal manifest persistence failed: ${failureMessage(written.error)}`
-      const retry = await this.writeTerminal(launch, runId, effectivePhase)
+      failureArtifact = await this.writeFailureRecord(launch, runId, effectivePhase, effectiveMessage, written.error)
+      const retry = await this.writeTerminal(launch, runId, effectivePhase, failureArtifact)
       if (!retry.ok) effectiveMessage = `${effectiveMessage}; retry failed: ${failureMessage(retry.error)}`
       try { launch.agent?.session?.append?.('planx/finalize-error', { runId, phase: effectivePhase, message: effectiveMessage, at }) } catch { /* containment: the run view is the last resort */ }
       try { this.failView(runId, 'FAILED', effectiveMessage, at) } catch { /* containment: never rethrow out of finalize */ }
@@ -452,6 +570,25 @@ export class OrchestrationService {
         at,
       })
     } catch { /* the manifest already records the terminal phase */ }
+    await this.deliverReport(launch, runId, effectivePhase, effectiveMessage)
+  }
+
+  /**
+   * Hand the bounded terminal report to the parent conversation exactly once.
+   *
+   * Contained on every path: a delivery surface that is missing or throwing must
+   * never change the phase the run already recorded.
+   */
+  private async deliverReport(launch: OrchestratorLaunch, runId: string, phase: string, message?: string): Promise<void> {
+    if (!isTerminalPhase(phase) || this.#reported.has(runId)) return
+    this.#reported.add(runId)
+    try {
+      const view = this.#views.get(runId)
+      const dir = this.store.runDir(launch.sessionId, runId)
+      const completion = await readJson<any>(join(dir, 'completion.json')).catch(() => undefined)
+      const text = terminalReportText(runId, phase, message, launch.artifact, view, completion)
+      deliverTerminalReport(launch.agent, runId, phase, text)
+    } catch { /* containment: a report failure is not a run failure */ }
   }
 
   private async persistApproval(launch: OrchestratorLaunch, runId: string, now: string): Promise<void> {
@@ -481,20 +618,29 @@ export class OrchestrationService {
     await atomicJson(join(dir, 'plan.json'), launch.artifact)
   }
 
-  private async markCancelled(view: RunView, reason: string, persistError?: unknown): Promise<void> {
+  private async markCancelled(launch: OrchestratorLaunch, view: RunView, reason: string, persistError?: unknown): Promise<void> {
     view.phase = 'CANCELLED'
     view.status = 'CANCELLED'
+    view.activeTaskIds = []
     view.message = persistError ? `${reason}; approval persistence failed: ${(persistError as Error).message}` : reason
     view.updatedAt = new Date().toISOString()
-    this.append(this.#agents.get(view.sessionId)?.session, 'planx/run-terminal', {
-      runId: view.runId, phase: 'CANCELLED', message: view.message, at: view.updatedAt,
-    })
+    // Contained: a session whose append is unavailable must still converge on a
+    // terminal manifest, because the pending fence is released by the caller and
+    // the manifest is the only durable record left.
+    try {
+      this.append(this.#agents.get(view.sessionId)?.session, 'planx/run-terminal', {
+        runId: view.runId, phase: 'CANCELLED', message: view.message, at: view.updatedAt,
+      })
+    } catch { /* the manifest below is the durable record */ }
     const manifest = await this.store.readManifest(view.sessionId, view.runId).catch(() => undefined)
     if (manifest) {
       manifest.phase = 'CANCELLED'
       manifest.terminal = true
-      await this.store.writeManifest(manifest)
+      await this.store.writeManifest(manifest).catch(() => {})
     }
+    // A cancelled run still reports; CANCELLED is the non-waking phase, so this
+    // queues context without forcing a turn for a run the user stopped.
+    await this.deliverReport(launch, view.runId, 'CANCELLED', view.message)
   }
 
   private append(session: any, type: string, data: any): void {

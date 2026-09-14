@@ -6,7 +6,7 @@ export const stateRoot = () => resolve(process.env.DSH_HOME ? join(process.env.D
 export function confined(root:string, ...parts:string[]){const base=resolve(root), target=resolve(base,...parts); if(target!==base&&!target.startsWith(base+sep))throw new Error('artifact path escapes plugin root'); return target}
 export async function atomicJson(path:string,value:unknown){await mkdir(dirname(path),{recursive:true});const tmp=`${path}.${randomUUID()}.tmp`;const body=JSON.stringify(value,null,2)+'\n';await writeFile(tmp,body,{encoding:'utf8',mode:0o600});await rename(tmp,path);return createHash('sha256').update(body).digest('hex')}
 export async function readJson<T>(path:string):Promise<T>{return JSON.parse(await readFile(path,'utf8')) as T}
-export interface RunManifest {schemaVersion:1;runId:string;sessionId:string;planHash:string;phase:string;terminal:boolean;createdAt:string;updatedAt:string;baselineHead?:string;repoRoot?:string;ownership?:string[];externalIssue?:{issueNumber:number;repository:string;revision:number;branch:string;publishAfterPass?:boolean};completedTaskIds?:string[];artifacts:Record<string,{sha256:string;bytes:number}>}
+export interface RunManifest {schemaVersion:1;runId:string;sessionId:string;planHash:string;phase:string;terminal:boolean;createdAt:string;updatedAt:string;baselineHead?:string;repoRoot?:string;ownership?:string[];externalIssue?:{issueNumber:number;repository:string;revision:number;branch:string;publishAfterPass?:boolean};completedTaskIds?:string[];failureArtifact?:{sha256:string;bytes:number};artifacts:Record<string,{sha256:string;bytes:number}>}
 export class RunStore {
   readonly root:string
   constructor(root=stateRoot()){this.root=root}
